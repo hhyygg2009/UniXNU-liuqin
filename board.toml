@@ -8,6 +8,13 @@ name = "liuqin"
 soc = "SM8475"
 description = "Xiaomi Pad 6 Pro"
 kit = "liuqin"                      # the package/ of this repository appears as kits/sheng in the build tree
+# os_profile and [components] are read only by schema_version = 2 and by the record
+# checker (scripts/porting-record.py). Under schema 1 the build ignores both, so they are
+# declared here to keep porting.toml's identity and component coverage valid.
+os_profile = "ipados-17.7.11-21H461"
+
+[components]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "ShengUfs", "XnuPrelink", "DarwinBoot"]
 
 # The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
 # it the remote url is read with range requests, only the members that are needed.

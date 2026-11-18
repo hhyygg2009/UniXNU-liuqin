@@ -1,0 +1,511 @@
+schema_version = 1
+
+# Structured porting record for the Xiaomi Pad 6 Pro (liuqin, SM8475).
+# Identity fields must match board.toml; check with
+#   python3 ../UniXNU/scripts/porting-record.py check --device ../UniXNU-liuqin
+# Evidence revisions are full 40-character commits of this repository.
+
+[device]
+name = "liuqin"
+soc = "SM8475"
+os_profile = "ipados-17.7.11-21H461"
+summary = "Boots the 21H461 XNU kernel from UEFI on real hardware through to the root mount decision; UFS reads and the userdata window are device-measured, the root volume is not mounted yet."
+
+[[area]]
+id = "configuration"
+status = "device-verified"
+components = ["ArmDTPlatform"]
+paths = ["board.toml", "configs/**", "package/**", "patches/**", ".github/**", ".gitignore", ".gitmodules", "scripts/**", "README.md", "AGENTS.md", "porting.toml"]
+inputs = [
+    "Stock firmware package liuqin_images_OS3.0.7.0.VMYCNXM_20260514.0000.00_15.0_cn (HyperOS 15, SM8475).",
+    "iPadOS 17.7.11 / 21H461 restore image iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw for the kernel and prelink inputs.",
+    "Linux host toolchain from scripts/linux/setup-toolchain.py, kept in the project tree at ../toolchain (its CommandLineTools/usr/bin/ld is what the kernel step needs).",
+]
+configuration = [
+    "board.toml [board] name=liuqin soc=SM8475 kit=liuqin.",
+    "[kernel] defconfig=liuqin_defconfig and the schema-1 [kernel] archives list: corecrypto-14 (twice, second namespaced), ArmDTPlatform, ArmCpu, libpthread-kernel, NativeAES, sheng platform-power, software AES bindings, NativeUfs, liuqin UFS bindings.",
+    "[kernel.prelink].roots selects 27 kexts that are linked into the closure, including com.apple.iokit.IOStorageFamily.",
+    "[payload] volume=LIQUNESP, size_mib=64, loader=firmware, timeout=15000, ui_scale=2, panic_screen_only=true.",
+    "[userdata] first_lba/last_lba/lba_bytes plus the window list; last_lba is taken from the device's own GPT rather than the vendor value.",
+]
+procedure = [
+    "cd ../UniXNU && export UNIXNU_DEVICE=$PWD/../UniXNU-liuqin UNIXNU_UEFI=$PWD/../uefi-liuqin UNIXNU_EDK2=$PWD/../uefi-liuqin/Mu_Basecore UNIXNU_TOOLCHAIN=$PWD/../toolchain",
+    "./unixnu build kernel",
+]
+findings = [
+    "The roots list was inherited from the sheng iOS 27 profile; the official iOS 17.7.11 profile does not list IOStorageFamily, so the family is prelinked here and registers IOBlockStorageDevice inside the __kernel__ metaclass batch. That is the whole background of the H16 crash family.",
+    "The kernel command line has to stay under 1000 bytes; offline-legacy-* and boot-ui-focus arguments were traded against each other to keep it there (commit 57b2d3c series).",
+    "Schema 1 keeps archives and roots inline in board.toml, so there is no component resolution at build time. [components] include is recorded here for the documentation catalogue only; the schema-1 build path never reads it.",
+]
+completion = [
+    "Every source pin resolves, the selected component set is recorded, and the patch order is reproducible from the .patches.sha256 stamp.",
+]
+limits = [
+    "board.toml is still schema_version 1: os_profile and [components] were added for the record, and the build ignores both.",
+    "os_overrides, feeds pins and the package layout have not been migrated to the schema-2 profile model.",
+]
+next_action = [
+    "Migrate board.toml to schema_version = 2 (profiles + component selection) and re-verify kernel, firmware, payload and bootimg end to end before changing anything else.",
+]
+evidence = [
+    { kind = "source", reference = "board.toml", result = "Board identity, archives, roots, payload and userdata values as listed above." },
+    { kind = "host", command = "./unixnu build kernel", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "https://github.com/hhyygg2009/UniXNU-liuqin", result = "rc=0, kernel.macho sha256 49247f07d0dd1fd13a7749d433b20895808ab45994c39b19349ee27bcbf8f76b" },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel shows the config line, the UniXNU boot menu and the kernel milestones, so the recorded configuration reaches the device." },
+]
+
+[[area]]
+id = "firmware"
+status = "device-verified"
+components = ["DarwinBoot"]
+paths = ["scripts/import-liuqin-uefi.py", "scripts/gen-liuqin-memory-map.py", "docs/vendor-inputs.md", "docs/liuqin-hardware.md"]
+inputs = [
+    "uefi.elf (stock firmware) with 93 PE32 and 58 raw modules extracted; uefiplat.cfg hard values recorded in docs/vendor-inputs.md.",
+    "Mu / Mu_Basecore + Silicium platform tree at ../uefi-liuqin; FD Build/liuqinPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd, 3145728 bytes.",
+    "Cape DTB at ../uefi-liuqin/Resources/DTBs/liuqin.dtb.",
+]
+configuration = [
+    "[firmware] config=liuqin, dsc/fd/packages/patches/preflight as recorded in board.toml.",
+    "Framebuffer handoff boot args fb=0xb8000000,1800,2880,7200 (32 bpp, stride 7200 bytes).",
+    "ADT built by scripts/make-liuqin-adt.py with --dram-size 0x80000000 --owned-memory-size 0x10000000 --chip-id 207 --cpu-regs 0,0x100,0x200,0x300,0x400,0x500,0x600,0x700 --ipad-identity.",
+]
+procedure = [
+    "./unixnu build firmware",
+    "./unixnu build payload --kernel out/liuqin/kernel/kernel.macho --unique-chip-id 0x84750A0B0C0D0001",
+]
+findings = [
+    "The loader prints HANDOFF EXIT RETURN 0x0 and DARWINBOOT: hand-off to the kernel, and the kernel reports the owned trampoline at pa 0xBF224000 with entry words D2B7031A 529FFFFB 72BFE01B D2A0003C, so the EL1/EL2 state handoff (SCTLR_EL1 0x30D0198D, TCR_EL1 0x280803518, PARange 2 4 KiB granule) is usable as-is.",
+    "fastboot boot accepts the full 69,525,504 byte image; the ABL buffer limit that forces flashing on tb128fu does not apply here, so no partition is ever written during bring-up.",
+    "PSCI is not used on this path; CPU bring-up goes through the ADT/ArmDTPlatform handoff instead.",
+]
+completion = [
+    "Firmware image builds, enters UniXNU, publishes the framebuffer with the recorded geometry and preserves the memory reservations declared in the ADT.",
+]
+limits = [
+    "The FD is a debug build without vendor secure-boot inputs; ENABLE_SECUREBOOT is 0.",
+]
+next_action = [
+    "Record the panel timing/bridge configuration from the firmware side so the display area can drop the fixed 1800x2880/7200 assumption.",
+]
+evidence = [
+    { kind = "source", reference = "docs/vendor-inputs.md", result = "154 vendor inputs extracted from the stock UEFI plus the uefiplat.cfg values." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel: config: \\EFI\\UniXNU\\unixnu.toml, READY TO ENTERQUEST, HANDOFF EXIT RETURN 0x0, DARWINBOOT: hand-off to the kernel, video base 0xB8000000 1800x2880 row 7200 bytes 32 bpp." },
+]
+
+[[area]]
+id = "cpu"
+status = "device-verified"
+components = ["ArmCpu"]
+paths = ["scripts/build-arm-driver.py", "configs/liuqin_defconfig"]
+inputs = [
+    "SM8475 CPU topology: eight cores, ARMv8.3 with pointer authentication, cluster register windows 0x000/0x100/.../0x700.",
+    "AppleKeyStore and timer inputs recorded in docs/liuqin-hardware.md.",
+]
+configuration = [
+    "boot args sheng-smp=1, sheng-cpufreq=3, armcpu-diagnostics=1, armcpu-spi-ipi=1, ml-timeout-lock-panic-scale=40.",
+    "ADT --cpu-regs 0,0x100,0x200,0x300,0x400,0x500,0x600,0x700 gives each cluster its register window.",
+]
+procedure = [
+    "./unixnu build kernel   # archives 03/04 build ArmDTPlatform and ArmCpu",
+]
+findings = [
+    "Per-CPU bring-up is observable on the panel: K31:thread_init, K32:restartable_init, K37:kernel_thread_create, K38:load_context - done, K39:idle_thread_create, T40:sched_startup, T41:thread_daemon_init, T43:thread_bind. Since v38 the kernel reaches K50-K57, so all enabled CPUs survive past scheduler start.",
+    "The timer path is healthy: standard timeslicing quantum is 100 us and standard background quantum is 250 us are printed, and no early watchdog reset occurs once sheng-disable-watchdogd=1 is set.",
+    "ID_AA64MMFR0_EL1 0x22200101122 and ID_AA64PFR0_EL1 0x1201101003111111 are read back on device and match the ARMv8.3 assumption, so pointer-authentication code paths in the prelinked kexts are valid.",
+]
+completion = [
+    "Every enabled CPU reaches its entry checkpoint and timer/IPI handling works on each enabled CPU.",
+]
+limits = [
+    "Core frequency/voltage control is only exercised through the sheng-cpufreq=3 code path; no per-core hotplug or deep idle has been tested.",
+]
+next_action = [
+    "Measure whether the four efficiency cores come online individually (add a per-CPU milestone to the ArmCpu bring-up and photograph the panel).",
+]
+evidence = [
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel milestones K31-K49 then K50-K57 with no CPU-related abort; ID registers and quantum lines printed." },
+]
+
+[[area]]
+id = "memory"
+status = "device-verified"
+components = []
+paths = ["scripts/gen-liuqin-memory-map.py", "scripts/make-liuqin-adt.py", "drivers/ShengUfs"]
+inputs = [
+    "DRAM size 0x80000000 and owned-memory size 0x10000000 declared to the ADT.",
+    "Splash framebuffer reservation at 0xB8000000 handed over by the firmware.",
+    "SMMU/DPU register windows measured by the UFS driver (native_ufs_dpu_smmu, native_ufs_extra_atos).",
+]
+configuration = [
+    "boot args kt_fixed_zones=120, offline-legacy-unit-scale=2.",
+    "ADT --dram-size 0x80000000 --owned-memory-size 0x10000000.",
+]
+procedure = [
+    "python3 scripts/gen-liuqin-memory-map.py",
+]
+findings = [
+    "vm_page_bootstrap reports 47007 free pages and 1729 wired pages, and the zone map dump (gIOKitPageableFixed1/2/3, bufferhdr, compressor, zone_meta, ipc_kernel_map, ipc_submap, zones, kernel_data_range, kernel_ptr_range, bsd_pageable, kernel_large_ranges) is consistent across rounds, so the reserved regions do not collide with the kernel heap.",
+    "The kalloc typed zones behave: the v37 stalled-array read showed kalloc_type(Z_WAITOK_ZERO) zero-fill holding (cnt=0 c0=0 c1=0), which is what disproved the dirty-array theory.",
+    "SMMU takeover is done inside the UFS driver rather than through a component: the driver records stream/idr values into native_ufs_dpu_smmu[24] and the DPU scan state into native_ufs_dpu_state, which is how the panel-side evidence is obtained without a debugger.",
+]
+completion = [
+    "All handoff regions are accounted for and each enabled DMA engine accesses its allocated range with the documented cache policy.",
+]
+limits = [
+    "DMA cache policy has only been exercised for UFS reads; no write-back correctness test has run because root publication is still refused.",
+]
+next_action = [
+    "Once the root mounts, re-measure the free/wired page counts and the UFS DMA window against the userdata range to confirm the cache policy on writes.",
+]
+evidence = [
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel: vm_page_bootstrap: 47007 free pages, 1729 wired pages; K8:zalloc zone dump; M:stalled pre cnt=0 c0=0 c1=0." },
+]
+
+[[area]]
+id = "storage"
+status = "device-verified"
+components = ["ShengUfs", "VirtioMmioBlock", "VerifiedRoot"]
+paths = ["drivers/ShengUfs", "scripts/build-liuqin-ufs-bindings.py", "scripts/build-arm-driver.py", "docs/porting-plan.md", "tests/metaclass-simtest/**"]
+inputs = [
+    "UFS host controller and GCC clock/reset registers measured from the stock firmware (docs/liuqin-hardware.md).",
+    "The device's own GPT: userdata partition first/last LBA read live, 4096-byte logical blocks.",
+    "Root volume UUID 04769D26-2CA0-4825-B443-E2E5F88300F2 from the live partition table, passed to the ADT as --root-match-volume-uuid.",
+]
+configuration = [
+    "boot args native-ufs-root=1, native-ufs-diagnostics=1, native-ufs-unauth-root=1, liuqin_allow_unsealed_root=1, -apfs_shared_datavolume, offline-legacy-register/validate/transfer=1.",
+    "[userdata] windows describe the OS/SystemOS/Data extents inside userdata; last_lba comes from the device.",
+    "drivers/ShengUfs is a fork on branch liuqin-sm8475 with the liuqin gate and startRoot diagnostics.",
+]
+procedure = [
+    "./unixnu build kernel   # archives 09/10 build NativeUfs and the liuqin UFS bindings",
+    "python3 drivers/ShengUfs/tests/check_legacy_descriptors.py --output <dir> --compiler g++",
+    "tests/metaclass-simtest/run.sh",
+]
+findings = [
+    "UFS reads, SCSI capacity, the GPT and the userdata window are correct on device; v34b already reached B94:at_pseudo with the root path enabled, and v38 reaches U59:start-root_init.",
+    "The metaclass batch is the blocker, not the controller. The v38 scan named it: slot 170 of 172 is NativeUfsBlock::gMetaClass at ffffff0007ae36b0 (panel p= matches the symbol exactly, sz=248 matches the constructor's 0xf8), and its superClassLink field at +0x10 holds the ASCII bytes 'a0)\\n[ 51' instead of the family pointer, so the guard drops that one class and no block device is ever published.",
+    "The link-time superclass binding is correct, so the text is a runtime scribble: the driver's MetaClass constructor loads &IOBlockStorageDevice::gMetaClass through its GOT slot at fffffff007a0c008 and that slot holds fffffff007add1d0 in the shipped image.",
+    "The v36 gate is a false positive on this build: because IOStorageFamily is prelinked, the name IOBlockStorageDevice is legitimately taken, so the gate always refuses root publication (panel I60:base-dup). It converted the abort into a readable failure, which is what made the diagnosis possible, but it also permanently blocks the root.",
+    "The duplicate-class theory that motivated the gate is dead: postModLoad reached the fault through the no-duplicate branch (getObject returned NULL) and our class registers under its own unique name NativeUfsBlock.",
+    "Host side: the upstream descriptor oracle passes 14/14, and simtest scenario D reproduces the v37 abort (postModLoad+0x2d4, x24=0x6131373030666666) and proves the shipped scan drops only the poisoned slot while the rest of the batch still registers with correct depth semantics.",
+]
+completion = [
+    "Host: register, clock, link and SMMU facts match the board inventory.",
+    "Reads: SCSI capacity, GPT and known blocks are correct; OS/SystemOS windows stay within userdata.",
+    "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region.",
+]
+limits = [
+    "Root is not mounted. The kernel prints Failed to mount root device @IOKitBSDInit.cpp:989 because NativeUfsBlock was dropped from the batch and the gate refused publication.",
+    "No write path has been exercised, so Data persistence is unverified.",
+    "Who writes eight bytes of console text over NativeUfsBlock::gMetaClass + 0x10 is still unknown; the driver's own neighbouring statics are excluded (native_ufs_extra_atos/dpu_smmu/dpu_state/dpu_check abut the object exactly and are all uint32).",
+]
+next_action = [
+    "Rework registration to the proven late shape: hand-written MetaClass subclass with a runtime-filled superClass pointer taken from the registered IOBlockStorageDevice, explicit preModLoad(g_kernel_kmod_info.name) / construct / postModLoad(handle), a re-fire latch, and a getClassSize() ABI gate; print the superClassLink before and after so the scribble is bracketed.",
+]
+evidence = [
+    { kind = "source", reference = "drivers/ShengUfs/NativeUfs.cpp", result = "startRoot, the H16 gate (liuqinBaseClassFree), the SMMU/DPU measurement arrays and the metaclass definition." },
+    { kind = "source", reference = "patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch", result = "The H16-E scan: per-slot naming, bounded ancestor-chain validation, skip-instead-of-refuse, and the summary line printed last." },
+    { kind = "host", command = "python3 drivers/ShengUfs/tests/check_legacy_descriptors.py --output /tmp/out --compiler g++", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "drivers/ShengUfs/tests/check_legacy_descriptors.py", result = "PASS 14 legacy/current descriptor comparisons" },
+    { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "cbbb7b13e5ebe51bd2f02c716455d04f37feacfe", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS, including D1 (v37 abort reproduced) and D2 (v38 scan drops exactly one slot)." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "M:bad[170] bad-chain p=0xfffffff007ae36b0 vt=0xfffffff0072086d0 sz=248 n=NativeUfsBlock bad=0x3135205b0a293061; M:stalled scan BAD cnt=1; U59:start-root_init then I60:base-dup; Failed to mount root device @IOKitBSDInit.cpp:989." },
+]
+
+[[area]]
+id = "display"
+status = "device-verified"
+components = []
+paths = ["scripts/patch-xnu-entry-probe.py", "patches/xnu/zzz-liuqin-usb-debug.patch", "docs/liuqin-hardware.md"]
+inputs = [
+    "Panel geometry 1800x2880, framebuffer base 0xB8000000, stride 7200 bytes, 32 bpp, as handed over by the firmware splash.",
+    "Backlight and DSI bring-up owned by the firmware during boot.",
+]
+configuration = [
+    "boot args fb=0xb8000000,1800,2880,7200, boot-progress=2, offline-legacy-gop=1, offline-mobile-graphics-client=1, offline-mobile-graphics-load=1.",
+    "payload ui_scale=2 so a 48-character milestone line is not cut at the right edge.",
+]
+procedure = [
+    "./unixnu build payload --kernel out/liuqin/kernel/kernel.macho --unique-chip-id 0x84750A0B0C0D0001",
+]
+findings = [
+    "The kernel text console renders directly onto the handed-over framebuffer, before pmap exists, through an identity mapping at 0xB8000000; after pmap it rebinds through ml_io_map. That is why every bring-up round is read from a photograph.",
+    "Colour bands at the top of the screen are stage markers; the green/cyan/yellow stack is the last thing the firmware drew, so a photograph also proves the panel is still scanning out.",
+    "Panic visibility was the single biggest diagnostic win: the 4K baseline _start is an inlined prologue rather than a movable single b, so the panic funnel is installed with --panic-only and the panic screen draws from the log ring instead of the live console. The screen replays only the last console lines, which is why the v38 scan summary is deliberately the final line printed.",
+]
+completion = [
+    "A known frame appears with correct geometry and colors, then userland presentation and backlight controls work.",
+]
+limits = [
+    "Only the boot console path is verified. There is no graphics client, no Surface, no backlight control from XNU and no presentation; the mobile graphics and GOP components are explicitly taken offline by boot args.",
+]
+next_action = [
+    "After the root mounts, keep the console alive through launchd and then measure the panel's DSI/backlight registers for a real display driver.",
+]
+evidence = [
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel legible from the config line through B103 plus the panic screen (Failed to mount root device @IOKitBSDInit.cpp:989, frames, pages/free)." },
+]
+
+[[area]]
+id = "input"
+status = "implemented"
+components = []
+paths = ["patches/xnu/zzz-boot-progress.patch", "docs/liuqin-hardware.md"]
+inputs = [
+    "PMIC/GPIO power and volume keys, touch over the Geni I2C/SPI bus (values recorded in docs/liuqin-hardware.md).",
+]
+configuration = [
+    "boot args sheng-touch=4, sheng-touch-hid=1, offline-hid-home=1, offline-hid-input=1, offline-key-events=1.",
+]
+procedure = [
+    "Observe the panel milestone lines for key events during boot.",
+]
+findings = [
+    "The power button is detected by the HID key path early enough to print LIOKEY: btn0 down (rtsts=90) on the panel, and the boot menu also accepts input (the timeout line invites typing yes).",
+    "Touch is not brought up on this build; the arguments are carried so the same image can be tested once the input components are selected.",
+]
+completion = [
+    "Touches map to the display, simultaneous contacts keep stable IDs, release events arrive, and buttons produce expected HID reports.",
+]
+limits = [
+    "No touch controller driver is linked into this kernel, so contact mapping and multi-touch are unverified.",
+]
+next_action = [
+    "Select the input components and record the first touch report against the panel geometry.",
+]
+evidence = [
+    { kind = "device", command = "fastboot boot boot-liuqin-v36c-gate.img", revision = "c9065af8297a4f08f2b54621430ce2e700b24347", reference = "docs/boot-rounds-v35-v38.md", result = "Panel shows LIOKEY: btn0 down (rtsts=90) during the boot-menu window." },
+]
+
+[[area]]
+id = "gpu"
+status = "planned"
+components = []
+paths = ["docs/liuqin-hardware.md", "docs/porting-plan.md"]
+inputs = [
+    "Adreno GPU on SM8475 with its GMU, power rails and SMMU context banks; register windows and firmware names still to be measured from this board.",
+    "GPU firmware blobs from the stock firmware package.",
+]
+configuration = [
+    "boot args sheng-gpu-metal=1, sheng-gpu-addon=1, sheng-gpu-power=9 are carried but no GPU component is linked.",
+]
+procedure = [
+    "Measure the GPU/GMU register window and power rails, then select a GPU component.",
+]
+findings = [
+    "Nothing has been attempted on the GPU yet; the boot arguments are placeholders reserved from the sheng profile and must not be read as evidence.",
+]
+completion = [
+    "GPU submissions complete, mapping/fence handling is correct, a known image renders, and the selected Metal client presents it.",
+]
+limits = [
+    "No GPU code is in the closure, so this area is entirely unstarted.",
+]
+next_action = [
+    "Record the GPU/GMU physical register windows and the cx/mx power vote path from the stock firmware before writing any driver code.",
+]
+evidence = [
+    { kind = "source", reference = "docs/liuqin-hardware.md", result = "Lists the GPU facts that are known and the ones still marked unknown, each with its source." },
+]
+
+[[area]]
+id = "network"
+status = "planned"
+components = []
+paths = ["docs/liuqin-hardware.md"]
+inputs = [
+    "Wi-Fi/Bluetooth combo chip on this board with its PCIe/QCA interface, firmware files and interrupt routing still to be measured.",
+]
+configuration = [
+    "No network component is selected in board.toml.",
+]
+procedure = [
+    "Identify the Wi-Fi chip, its bus and firmware, then select the matching component.",
+]
+findings = [
+    "Not started. USB networking over the debug port is a diagnostics channel, not a network port, and is recorded under diagnostics.",
+]
+completion = [
+    "Scanning, association, address configuration and sustained receive/transmit traffic pass with the selected firmware.",
+]
+limits = [
+    "No Wi-Fi code is in the closure.",
+]
+next_action = [
+    "Measure the PCIe link and the chip identity, and record the firmware paths from the stock package.",
+]
+evidence = [
+    { kind = "source", reference = "docs/liuqin-hardware.md", result = "Wireless chip identity listed as still unknown, with the measurement method recorded." },
+]
+
+[[area]]
+id = "audio"
+status = "planned"
+components = []
+paths = ["docs/liuqin-hardware.md"]
+inputs = [
+    "ADSP firmware, codec, clocks and the GPR/GLINK routing, none of which are measured for this board yet.",
+]
+configuration = [
+    "No audio component is selected.",
+]
+procedure = [
+    "Bring up ADSP loading first, then the codec route.",
+]
+findings = [
+    "Not started.",
+]
+completion = [
+    "Each declared route carries the selected audio format through playback or capture and handles start/stop correctly.",
+]
+limits = [
+    "No DSP or audio code is in the closure.",
+]
+next_action = [
+    "Locate the ADSP image and its SMEM/SMP2P handoff in the stock firmware.",
+]
+evidence = [
+    { kind = "source", reference = "docs/liuqin-hardware.md", result = "Audio block listed as unknown with the measurement method recorded." },
+]
+
+[[area]]
+id = "power"
+status = "device-verified"
+components = []
+paths = ["package/ShengPlatformPower.cpp", "scripts/build-sheng-platform-power.py", "scripts/build-software-aes-bindings.py"]
+inputs = [
+    "PMIC/PMGR register access and the watchdog contract measured from the stock firmware.",
+    "AppleKeyStore state inputs for the AES bindings (NativeAES plus software fallback).",
+]
+configuration = [
+    "boot args pmgr=2, sheng-disable-watchdogd=1, sheng-aks=1, boot-diag-resume=0, sheng-gpu-power=9.",
+    "Archive 07 builds the sheng platform-power provider, archive 08 the software AES bindings.",
+]
+procedure = [
+    "./unixnu build kernel   # archives 07/08",
+]
+findings = [
+    "The pmgr=2 gate is passed: v34b wired the provider and every round since boots without the PMGR-related early panic, reaching K47:bootprofile_init and beyond.",
+    "With sheng-disable-watchdogd=1 the panel holds the last screen indefinitely, which is what makes photograph-based readout reliable; no round has lost a screen to an unscheduled watchdog reset.",
+    "The AES bindings archive exists so APFS can decrypt once the root mounts; it is built but its effect is unverified because the root never mounted.",
+]
+completion = [
+    "Declared power controls and battery readings match observations; each claimed sleep/resume transition restores its dependent peripherals.",
+]
+limits = [
+    "Battery, charging, sleep/resume and regulator states are untested; only the PMGR gate and the watchdog suppression are observed.",
+]
+next_action = [
+    "Read the battery/charger registers through the provider and record them against Android's values on the same device.",
+]
+evidence = [
+    { kind = "source", reference = "package/ShengPlatformPower.cpp", result = "The liuqin platform-power provider wired by commit cd21cfc." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "K47:bootprofile_init reached and the screen persists with no watchdog reset; the same behaviour holds across v34b-v38." },
+]
+
+[[area]]
+id = "packaging"
+status = "device-verified"
+components = ["XnuPrelink", "SoftwareAES"]
+paths = ["scripts/pack-bootimg-liuqin.sh", "scripts/wrap-payload-mbr.py", "scripts/build-liuqin-ufs-bindings.py", "scripts/patch-xnu-entry-probe.py", "scripts/make-liuqin-adt.py", "patches/**"]
+inputs = [
+    "iPadOS 17.7.11 / 21H461 kernelcache as the prelink base, with --slide=-0x1000000.",
+    "The 27 selected roots plus the early-security-init pin com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0.",
+    "FD, BootShim and the Cape DTB for the final image.",
+]
+configuration = [
+    "[kernel.prelink] roots and [bootimg] in board.toml; payload size_mib=64 with volume LIQUNESP.",
+    "trust_cache_sha256 and the ADT inputs recorded in [payload.adt].",
+]
+procedure = [
+    "./unixnu build kernel && ./unixnu build payload --kernel out/liuqin/kernel/kernel.macho --unique-chip-id 0x84750A0B0C0D0001",
+    "python3 scripts/wrap-payload-mbr.py out/liuqin/payload/payload.img out/liuqin/payload/payload-mbr.img",
+    "./unixnu bootimg --fd ../uefi-liuqin/Build/liuqinPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd --dtb ../uefi-liuqin/Resources/DTBs/liuqin.dtb --ramdisk out/liuqin/payload/payload-mbr.img",
+]
+findings = [
+    "A reproducible size check exists for the packing: v36c, v37 and v38 are all exactly 69,525,504 bytes. A 68,476,928-byte image means the MBR wrap step was skipped and the raw 64 MiB payload was used, and PartitionDxe then cannot see the ESP.",
+    "The patch series is replayed exactly once, guarded by .cache/xnu-work/.patches.sha256; editing any patch (as H16-D to H16-E did) changes the stamp and rebuilds the tree, which is how the v38 image was proven to contain the new scan.",
+    "Payload-side injection is verified byte-wise: the panic screen is 0xa0f bytes at fffffff00741e500 in the zero-filled region, hooked from _panic and _panic_trap_to_debugger.",
+    "The build is reproducible and board.toml additions are inert under schema 1: after [board] os_profile and [components] include were added for this record, a dry-run rebuild produced the byte-identical kernel.macho sha256 49247f07d0dd1fd13a7749d433b20895808ab45994c39b19349ee27bcbf8f76b.",
+    "In-image verification of a kernel patch is done by disassembling the shipped binary, not the object: postModLoad base fffffff0078926a0 with the new call sites at +0x17c, +0x33c, +0x368 and +0x48c, and the diagnostic format strings present in kernel.macho.",
+]
+completion = [
+    "Kernel and prelink succeed, payload contains all declared inputs, and the boot image matches the bootloader format and size limit.",
+]
+limits = [
+    "Images are only ever loaded with fastboot boot; nothing is flashed, so there is no persistence test of the packaging across reboots.",
+]
+next_action = [
+    "Keep recording the kernel.macho and boot.img sha256 per round in docs/boot-rounds-v35-v38.md so evidence revisions stay tied to a byte-exact image.",
+]
+evidence = [
+    { kind = "source", reference = "scripts/wrap-payload-mbr.py", result = "Produces the 65 MiB MBR-wrapped payload the firmware's PartitionDxe requires." },
+    { kind = "host", command = "./unixnu build kernel && ./unixnu build payload --kernel out/liuqin/kernel/kernel.macho --unique-chip-id 0x84750A0B0C0D0001 && ./unixnu bootimg --fd ... --dtb ... --ramdisk out/liuqin/payload/payload-mbr.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "README.md", result = "boot.img 69,525,504 bytes, sha256 08a01ee150dd0979f99905b278d9b5c66434c1352d7e5b9b23f6e3de0efd2068; kernel.macho sha256 49247f07d0dd1fd13a7749d433b20895808ab45994c39b19349ee27bcbf8f76b" },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Sending boot.img OKAY, Booting OKAY, and the kernel runs to the mount decision." },
+]
+
+[[area]]
+id = "diagnostics"
+status = "device-verified"
+components = []
+paths = ["scripts/check-liuqin.py", "tests/metaclass-simtest/**", "tests/liuqin_usb_host_test.c", "docs/liuqin-usb-debug.md", "patches/xnu/zzz-liuqin-usb-debug*.patch", "docs/boot-rounds-v35-v38.md"]
+inputs = [
+    "Panel milestone console (prefixes K, B, U, I, T and M), a 1 MiB log ring and a USB CDC-ACM debug port (LIQDBG001).",
+    "Host-side toolchain: llvm-nm/llvm-objdump against the unstripped kernel for offline symbolization.",
+]
+configuration = [
+    "boot args startup_debug=1, native-ufs-diagnostics=1, armcpu-diagnostics=1, boot-progress=2, debug=0x14e, -no_slto_panic.",
+    "panic_screen_only=true in [payload] so kernel panics reach the panel.",
+]
+procedure = [
+    "fastboot boot <image>, then photograph the panel; read the ring over the USB debug port when a serial capture is needed.",
+    "python3 tests/liuqin_usb_host_test.c build via tests/run-host-test.sh for the debug-port logic.",
+    "tests/metaclass-simtest/run.sh for the metaclass scan behaviour.",
+]
+findings = [
+    "Offline symbolization is the core technique: the panel gives pc/lr/far and a frame list, and the unstripped kernel maps them to functions and exact instructions. That is how postModLoad+0x2d4 became 'the first hop of the depth walk, reached through the no-duplicate branch'.",
+    "Register values are decoded as data, not just addresses: far = x24 + 0x10 confirmed the faulting ldr, and x24 = 0x6131373030666666 decoded as the ASCII bytes 'ffff007a' proved the poisoned field held console text.",
+    "Diagnostics must be printed last: the panic screen redraws the panel and keeps only the final console lines, so the v38 scan summary is the last line emitted on purpose.",
+    "The milestone console never touches storage or locks, so it survives the hang cases that lose the log ring; the USB port adds the full 1 MiB ring when a photograph is not enough.",
+]
+completion = [
+    "Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result.",
+]
+limits = [
+    "There is no kernel debugger session; kdb is configured over serial but never attached, so everything is post-mortem from photographs and the ring.",
+]
+next_action = [
+    "Add the M:reg before/after snapshot to the storage driver so the next round brackets who writes over the metaclass object.",
+]
+evidence = [
+    { kind = "source", reference = "docs/liuqin-usb-debug.md", result = "The debug port contract: switch, the four self-test gates and the porting comparison table." },
+    { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "cbbb7b13e5ebe51bd2f02c716455d04f37feacfe", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS (scenarios A, B, C and the new D)." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "M:stalled pre/post, M:bad[170] and M:stalled scan BAD lines legible on the panel, plus the panic screen with pc/lr/far, registers and frames." },
+]
+
+[[area]]
+id = "cellular"
+status = "not-applicable"
+components = []
+paths = ["docs/liuqin-hardware.md"]
+inputs = [
+    "This unit is the Wi-Fi-only SKU of the Xiaomi Pad 6 Pro; there is no modem, SIM slot or EFS partition on the board being ported.",
+]
+configuration = [
+    "No baseband component is selected and no modem boot argument is set.",
+]
+procedure = [
+    "Confirm the SKU from the stock firmware partition list before declaring this area not applicable.",
+]
+findings = [
+    "The stock package has no modem NV/EFS images for this SKU, so QRTR/QMI, IPA/QMAP and data-session work is out of scope for liuqin as configured here.",
+]
+completion = [
+    "Not applicable: nothing to complete on this SKU.",
+]
+limits = [
+    "Scope is the Wi-Fi-only variant. The LTE variant of the same product name would need its own record area and inputs.",
+]
+next_action = [
+    "None; revisit only if a modem-equipped unit is added.",
+]
+evidence = [
+    { kind = "source", reference = "docs/liuqin-hardware.md", result = "Board inventory records the SKU as Wi-Fi-only, with the partition list as the source." },
+]

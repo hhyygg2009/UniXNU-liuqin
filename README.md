@@ -9,6 +9,8 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
 板级关键数值已经从 stock 固件里核实完了，board.toml 里每个 TODO 都有明确的取值方法和当前状态。
 
     board.toml                 板级描述（userdata LBA、splash、FD 窗口已填实测值）
+    porting.toml               设备适配记录（schema_version = 1，14 个部分，逐条带证据）
+    AGENTS.md                  agent 必读入口：职责、依赖、构建入口、记录链接、硬性约束
     configs/liuqin_defconfig   内核配置（从 sheng 派生，PMGR/Adreno/UUID 标了 TODO）
     docs/liuqin-hardware.md    硬件底账：已核实 / 仍未知，每条带来源
     docs/vendor-inputs.md      stock UEFI 抽出的 154 个厂商输入 + uefiplat.cfg 硬数据
@@ -108,6 +110,30 @@ ABI 闸，并在注册前后各打一行 `M:reg` 快照。这样既绕开那 172
 `postModLoad+0x2d4` abort，并证明扫描只丢掉那个中毒槽**）；
 上游 descriptor oracle `drivers/ShengUfs/tests/check_legacy_descriptors.py`（14/14）。
 镜像本身放在构建机的 `releases/`（不入库，`fastboot boot` 用）。
+
+## 收录与发布
+
+按 [发布与复用](https://unixnu.com/zh/porting/records#publishing-and-reuse) 的要求：
+
+- GitHub topic 已加 `unixnu`（目录检索范围）与 `liuqin`。
+- 设备记录 `porting.toml`（`schema_version = 1`，13 个必需部分 + `cellular` 不适用）已入库，
+  本地检查通过：
+
+      python3 ../UniXNU/scripts/porting-record.py check --device ../UniXNU-liuqin
+      # liuqin: 14 structured areas checked
+
+- `.github/workflows/porting-record.yml` 调用官方可复用工作流，PR/push 上跑同一检查。
+- 为了让记录的身份与组件覆盖成立，`board.toml` 补了 `[board] os_profile` 和
+  `[components] include`。这两项在 **schema_version = 1 下构建根本不读**，已实测证明：
+  补完之后 dry-run 重构建产出**逐字节相同**的 `kernel.macho` sha256 `49247f07…`。
+
+还差的（需要一次真正的迁移，不是文档活）：`board.toml` 仍是 **schema 1**，而目录的 format 2
+要求 `schema_version = 2` + profile/组件选择模型；官方 `devices.toml` 里 liuqin 目前登记为
+`format = 1`、`legacy_page = "preserve"`、钉在旧提交 `907b8e91`，摘要还停在"UEFI next"。
+迁移完成后由 `sync-devices` 工作流（UTC 00:00 / 12:00，即 UTC+8 08:00 / 20:00）重新扫描生成页面，
+也可手动触发：
+
+    gh workflow run sync-devices.yml --repo UniXNU/UniXNU
 
 ## 致谢 / Acknowledgments
 

@@ -1,3 +1,4 @@
 out/
 .cache/
 *.log
+tests/metaclass-simtest/sim
