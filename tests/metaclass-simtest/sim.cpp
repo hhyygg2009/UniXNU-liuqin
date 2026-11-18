@@ -1,9 +1,12 @@
 // Host simulation of the liuqin H16 metaclass family: the base-class policy, the
 // scan that used to drop the poisoned slot, and the H16-F repair that keeps it.
 //
-// Three files are extracted verbatim from the production driver by extract.py
-// (helper.inc, witness.inc, gate.inc); the only substitution that script makes is
-// liuqinPtrOk's address floor, which cannot mean anything on a host address space.
+// Five files are extracted verbatim by extract.py: helper.inc, witness.inc and gate.inc
+// come from the production driver, ring.inc is the kernel's console mirror and report.inc is
+// the libkern half of H16-G, both pulled out of the XNU patches. The only substitution the
+// script makes is liuqinPtrOk's address floor, which cannot mean anything on a host address
+// space. Everything below the includes is the harness: the IOKit batch, a mirror of
+// postModLoad's first pass, and the console the fingerprint searches.
 // The scan loop below mirrors OSMetaClass::postModLoad's first pass in
 // patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch, and the
 // harness deliberately calls the production liuqin_block_super_fix() through the
@@ -85,14 +88,137 @@ static void liuqin_milestone(const char *t, const char *m)
     gMilestoneTag = t; gMilestoneMsg = m;
     printf("milestone %s:%s\n", t, m);
 }
-static void liuqin_debug_puts(const char *s) { fputs(s, stdout); }
+// ---- the console mirror the H16-G fingerprint searches ----------------------
+// ring.inc is lq_ring / lq_append / lq_copy exactly as bsd/dev/liuqin_debug.c gets them, so
+// the bytes the search reads are the bytes the kernel prints. log_lock is stood in for by
+// simRingLockBusy, whose two production consequences are reproduced together: an append is
+// dropped and counted, a copy simply returns 0. The panel is a *separate* channel: it always
+// sees the text and it keeps only its last lines, which is why v37 lost a conclusion and why
+// the driver replays evidence -- assertions about "what a photo would show" read simPanel.
+#include "ring.inc"
+
+static struct lq_ring simRing;                    // one megabyte, the kernel's own size
+static bool simRingLockBusy = false;
+static unsigned long long simRingDropped = 0;
+static std::string simPanel;
+static const size_t SIM_PANEL_KEEP = 512;         // the panel only ever shows the tail
+
+static void simConsole(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void liuqin_debug_append(const char *data, int size)
+{
+    if (size <= 0) return;
+    if (simRingLockBusy) { simRingDropped += (unsigned long long) size; return; }
+    lq_append(&simRing, data, (unsigned) size);
+}
+
+static bool simQuiet = false;                    // filler lines are state, not test output
+
+static void liuqin_debug_puts(const char *s)
+{
+    liuqin_debug_append(s, (int) strlen(s));      // production order: mirror, then panel
+    simPanel += s;
+    if (simPanel.size() > SIM_PANEL_KEEP)
+        simPanel = simPanel.substr(simPanel.size() - SIM_PANEL_KEEP);
+    if (!simQuiet) fputs(s, stdout);
+}
+
+static unsigned liuqin_debug_copy(uint64_t *pos, char *out, unsigned max)
+{
+    if (!max || simRingLockBusy) return 0;        // cannot take log_lock: report, never spin
+    return lq_copy(&simRing, pos, out, max);
+}
+
+static uint64_t liuqin_debug_total(void) { return simRing.total; }
+
+static void simConsole(const char *fmt, ...)
+{
+    char line[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    liuqin_debug_puts(line);                      // what liuqin_slot_dump/puts do in kernel
+}
+
+// Test-side readers. mirrorFindAt searches the whole readable ring through the production
+// copy path and returns the offset of the first occurrence, so "this line was printed before
+// that line" is an assertion about the mirror rather than about stdout.
+static std::string mirrorText()
+{
+    std::string all;
+    uint64_t pos = 0;
+    char chunk[256];
+    for (;;) {
+        unsigned got = liuqin_debug_copy(&pos, chunk, sizeof chunk);
+        if (!got) break;
+        all.append(chunk, got);
+    }
+    return all;
+}
+
+static long long mirrorFindAt(const char *needle)
+{
+    size_t f = mirrorText().find(needle);
+    return f == std::string::npos ? -1 : (long long) f;
+}
+
+static unsigned panelCount(const char *needle)
+{
+    unsigned n = 0;
+    for (size_t f = simPanel.find(needle); f != std::string::npos; f = simPanel.find(needle, f + 1))
+        n++;
+    return n;
+}
+
+static void simEmitLines(unsigned count)          // filler that walks the mirror forward
+{
+    static const std::string filler = std::string(63, 'x') + "\n";   // exactly 64 bytes
+    simQuiet = true;
+    for (unsigned i = 0; i < count; i++) liuqin_debug_puts(filler.c_str());
+    simQuiet = false;                              // not printed: 1 MiB of it is not evidence
+}
+
+// A line the boot printed but the harness does not echo: still mirrored, still on the
+// panel, just not test output. Used where the point is what came after it.
+static void simEmitLinesQuiet(const char *s)
+{
+    simQuiet = true;
+    liuqin_debug_puts(s);
+    simQuiet = false;
+}
+
+static bool panelHas(const char *line) { return simPanel.find(line) != std::string::npos; }
+static bool mirrorHas(const char *line) { return mirrorFindAt(line) >= 0; }
+
+static unsigned long long pack8(const char *s)    // the word as memory holds it: s[0] low
+{
+    unsigned long long v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | (unsigned char) s[i];
+    return v;
+}
+
 static volatile const char *native_ufs_root_failure = nullptr;
 static unsigned simSkipGate = 0;                 // boot-arg stand-in, see below
 static void PE_parse_boot_argn(const char *, unsigned *out, unsigned) { *out = simSkipGate; }
 
-// The extracted production code (driver side, H16-F):
+// The extracted production code: driver side (H16-F/G) and the libkern call site (H16-G).
 #include "helper.inc"
 #include "witness.inc"
+#include "report.inc"
+
+// Production keeps one mirror and one fingerprint budget per boot; the harness runs many
+// boots inside one process, so every H16-G case wipes all three pieces of state (the mirror
+// here, the counter in report.inc, the replayed line in helper.inc).
+static void simBootReset()
+{
+    memset(&simRing, 0, sizeof simRing);
+    simRingLockBusy = false;
+    simRingDropped = 0;
+    simPanel.clear();
+    liuqinFingerprints = 0;
+    liuqinFpEvidence[0] = '\0';
+}
 
 // ---- the mirrored first pass of OSMetaClass::postModLoad --------------------
 static unsigned gDeepest = 0;
@@ -106,13 +232,16 @@ static int scanPass(std::vector<OSMetaClass*> &stalled, std::vector<OSMetaClass*
     int bad = 0, healed = 0;
     for (size_t i = 0; i < stalled.size(); i++) {
         OSMetaClass *me = stalled[i];
-        if (me && !liuqinPtrOk(me)) { stalled[i] = nullptr; bad++; continue; }   // M:dirty
+        if (me && !liuqinPtrOk(me)) {                 // the M:dirty branch of the patch
+            simConsole("M:dirty[%zu] p=%p\n", i, (const void *) me);
+            stalled[i] = nullptr; bad++; continue;
+        }
         if (!me) continue;
         for (auto *c : all) if (c->className && me->className &&
                                 !strcmp(c->className, me->className)) {
             printf("PANIC would fire: duplicate %s\n", me->className); return -2;
         }
-        if (naive) {                              // the v37 fault shape
+        if (naive) {                              // the v37 fault shape (no guard existed)
             OSMetaClass *walk = me;
             while ((walk = walk->superClassLink)) {
                 if (!liuqinPtrOk(walk)) {
@@ -126,6 +255,9 @@ static int scanPass(std::vector<OSMetaClass*> &stalled, std::vector<OSMetaClass*
         const void *badLink = nullptr;
         int depth = liuqinChainDepth(me, &badLink);
         if (depth < 0) {
+            // The patch calls the fingerprint strictly before it tries to repair anything,
+            // so the order of these two lines is itself a mirrored fact (F1 asserts it).
+            liuqin_fingerprint("scan", me, badLink);
             // verbatim in intent with the patched scan: ask the driver for the link-time
             // superclass, validate, write it, re-walk; keep the class when that works.
             const void *fix = (gHealInScan && liuqin_metaclass_super_fix)
@@ -135,12 +267,12 @@ static int scanPass(std::vector<OSMetaClass*> &stalled, std::vector<OSMetaClass*
                 badLink = nullptr;
                 depth = liuqinChainDepth(me, &badLink);
                 if (depth > 0) {
-                    printf("M:bad[%zu] fixed n=%s bad=%p\n", i, me->className, fix);
+                    simConsole("M:bad[%zu] fixed n=%s bad=%p\n", i, me->className, fix);
                     healed++;
                 }
             }
             if (depth < 0) {
-                printf("M:bad[%zu] bad-chain n=%s bad=%p\n", i, me->className, badLink);
+                simConsole("M:bad[%zu] bad-chain n=%s bad=%p\n", i, me->className, badLink);
                 stalled[i] = nullptr; bad++; continue;
             }
         }
@@ -323,6 +455,179 @@ int main() {
         assert(liuqin_block_super_fix(nameOurs) == &family);
         printf("E4(name match is exact): foreign and truncated names get nothing\n");
     }
+    // ---- scenario F: H16-G, the fingerprint and the mirror it searches ------------
+    // v38 proved the poison is text, so the interesting object is no longer the pointer but
+    // the console mirror it came from. These cases exercise the production search (the
+    // driver's liuqinRingFind over the kernel's lq_copy) against a mirror that is filled the
+    // way a real boot fills it: with the producer, with our own report, with a wrapped ring.
+    const unsigned long long tok1 = pack8("abc12345");     // producer line carries it raw
+    const unsigned long long tok2 = pack8("zzQQzz77");     // pure printable: only we print it
+    const char *producer = "M:stalled post h=0xfffffff568caffe0 cnt=172 tok=abc12345 tail\n";
+    const unsigned long long PRODUCER_AT =
+        (unsigned long long) (strstr(producer, "abc12345") - producer);   // not counted by hand
+    OSMetaClass ours{};                                     // a second, independent slot
+
+    // F1: a real producer, found through the scan path, with the numbers the panel needs.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();                        // both hooks, as the ctor does
+        liuqin_debug_puts(producer);
+        simEmitLinesQuiet("early UFS window line 1\n");
+        simEmitLinesQuiet("early UFS window line 2\n");
+        const unsigned long long totalAtSearch = simRing.total;
+        NativeUfsBlock::gMetaClass.className = nameOurs;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass *) tok1;
+        family.superClassLink = &ioService;
+        std::vector<OSMetaClass*> batch{&family, &NativeUfsBlock::gMetaClass}, dict;
+        unsigned healed = 0;
+        int bad = scanPass(batch, dict, false, &healed);
+
+        char want[192];
+        snprintf(want, sizeof want, "M:fp scan ring hits=1 self=0 lost=0 at=%llu after=%lld total=%llu",
+                 PRODUCER_AT, (long long) (totalAtSearch - PRODUCER_AT - 8),
+                 (unsigned long long) totalAtSearch);
+        assert(mirrorHas(want));                            // exact numbers, not "a hit"
+        assert(mirrorHas("ctx|"));
+        assert(mirrorHas("tok=abc12345 tail"));             // the producer is quoted back
+        // The patch fingerprints before it repairs; if that ever inverts, the search reads a
+        // mirror that already contains this boot's own verdict.
+        assert(mirrorFindAt("M:fp scan p=") < mirrorFindAt("M:bad[1] fixed"));
+        assert(bad == 0 && healed == 1 && dict.size() == 2);
+        printf("F1(producer found): at/after/total exact, fingerprint strictly before repair\n");
+    }
+
+    // F2: the trap. A pure-printable needle is written verbatim into asc="..." by our own
+    // report, so the mirror does hold it -- after the search. A second report must call that
+    // ours, never a producer: a self-hit with a real offset points at a line nobody wrote.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        NativeUfsBlock::gMetaClass.className = nameOurs;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass *) tok2;
+        std::vector<OSMetaClass*> batch{&family, &NativeUfsBlock::gMetaClass}, dict;
+        unsigned healed = 0;
+        assert(scanPass(batch, dict, false, &healed) == 0 && healed == 1);
+        assert(mirrorHas("asc=\"zzQQzz77\""));             // the bytes are in the mirror now
+        assert(mirrorHas("M:fp scan ring clean self=0"));   // ... and the search still said clean
+        liuqinMetaclassPoisonReport("pub", &NativeUfsBlock::gMetaClass, tok2);
+        assert(mirrorHas("M:fp pub ring clean self=1"));    // second look: ours, not a producer
+        assert(!mirrorHas("M:fp pub ring hits"));
+        printf("F2(no self-hit): first search clean, replay classifies itself as self=1\n");
+    }
+
+    // F3: the ring wrapped and the producer is gone. "clean" would be a false negative; the
+    // only honest word is that the mirror lost the evidence.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        liuqin_debug_puts(producer);                        // offset 39, the first thing printed
+        simEmitLines(16400);                                // 64 B each -> 1,049,600 B > 1 MiB
+        const unsigned long long lost = simRing.total - LQ_RING_SIZE;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass *) tok1;
+        char want[160];
+        snprintf(want, sizeof want, "M:fp scan ring lost self=0 lost=%llu total=%llu",
+                 lost, (unsigned long long) simRing.total);
+        liuqinMetaclassPoisonReport("scan", &NativeUfsBlock::gMetaClass, tok1);
+        assert(mirrorHas(want));
+        assert(!mirrorHas("M:fp scan ring clean"));
+        printf("F3(evidence overwritten): lost=%llu reported, never read as clean\n", lost);
+    }
+
+    // F4: the ring wrapped and the producer survived. Offsets must come from where the copy
+    // actually started, not from the position that was asked for: the clamp in lq_copy moves
+    // it forward and an offset taken from the request points into memory the ring threw away.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        simEmitLines(16384);                                // exactly LQ_RING_SIZE bytes
+        liuqin_debug_puts(producer);                        // token at 1,048,615
+        simEmitLines(5);
+        const unsigned long long at = LQ_RING_SIZE + PRODUCER_AT;
+        const unsigned long long lost = simRing.total - LQ_RING_SIZE;   // 384 bytes of filler
+        char want[160];
+        snprintf(want, sizeof want, "M:fp scan ring hits=1 self=0 lost=%llu at=%llu after=%lld total=%llu",
+                 lost, at, (long long) (simRing.total - at - 8), (unsigned long long) simRing.total);
+        liuqinMetaclassPoisonReport("scan", &NativeUfsBlock::gMetaClass, tok1);
+        assert(mirrorHas(want));
+        printf("F4(wrapped ring, live producer): at=%llu with lost=%llu, offsets from the real base\n",
+               at, lost);
+    }
+
+    // F5: the mirror's lock is held. The search must give up at once -- a scan that spins
+    // while holding the metaclass lock is a new way to lose the boot.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        liuqin_debug_puts(producer);
+        simRingLockBusy = true;
+        const unsigned long long before = simRing.total, droppedBefore = simRingDropped;
+        liuqinMetaclassPoisonReport("scan", &NativeUfsBlock::gMetaClass, tok1);
+        simRingLockBusy = false;
+        // Contention costs both halves of the console: nothing new reached the mirror (the
+        // search could not read and the verdict could not be written), yet the panel still
+        // shows the verdict, because painting never waits on the lock.
+        assert(simRing.total == before);                  // the ring did not move at all
+        assert(simRingDropped > droppedBefore);             // counted as dropped, not lost
+        assert(panelHas("M:fp scan ring gaveup self=0"));
+        printf("F5(lock busy): one copy attempt, verdict gaveup, nothing spun\n");
+    }
+
+    // F6: the cap, and the board without this driver. Two fingerprints per boot is the whole
+    // budget; with no hook installed the output is H16-F's, line for line.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        OSMetaClass slot0{}, slot1{}, slot2{};
+        slot0.className = nameOurs; slot1.className = nameOurs; slot2.className = nameOurs;
+        addToImage(&slot0); addToImage(&slot1); addToImage(&slot2);
+        slot0.superClassLink = (OSMetaClass *) pack8("aa112233");
+        slot1.superClassLink = (OSMetaClass *) pack8("bb445566");
+        slot2.superClassLink = (OSMetaClass *) pack8("cc778899");
+        std::vector<OSMetaClass*> batch{&slot0, &slot1, &slot2}, dict;
+        scanPass(batch, dict, false);
+        assert(panelCount("M:fp scan p=") == 2);
+        assert(panelCount("M:bad[") == 3);
+        // and on a board where this driver never ran: no hooks at all, so the scan has to
+        // read exactly like v39 -- the poison named, the slot lost, nothing fingerprinted.
+        simBootReset();
+        liuqin_metaclass_super_fix = nullptr;
+        liuqin_metaclass_poison_report = nullptr;
+        slot0.superClassLink = (OSMetaClass *) tok1;
+        dict.clear(); batch = {&family, &slot0};
+        family.superClassLink = &ioService;
+        unsigned healed = 99;
+        assert(scanPass(batch, dict, false, &healed) == 1 && healed == 0);
+        assert(dict.size() == 1 && dict[0] == &family);     // v39 behaviour, unchanged
+        assert(!mirrorHas("M:fp"));                         // no H16-G output at all
+        assert(mirrorHas("M:bad[1] bad-chain n=NativeUfsBlock"));
+        printf("F6(budget and absence): 2 fingerprints then silence; hookless board is v39\n");
+    }
+
+    // F7: the panel scrolls. The evidence must survive that, and only at the last witness --
+    // v37 lost M:stalled post exactly this way.
+    {
+        simBootReset();
+        liuqinInstallMetaclassFix();
+        liuqin_debug_puts(producer);
+        NativeUfsBlock::gMetaClass.className = nameOurs;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass *) tok1;
+        liuqinMetaclassWitness("pre");                      // repairs, and fingerprints
+        assert(liuqinFpEvidence[0] != '\0');
+        simEmitLines(20);                                   // the panel forgets the ctx line
+        assert(!panelHas("ctx|"));
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass *) tok1;   // scribbled again
+        liuqinMetaclassWitness("pre");                      // pre must NOT replay
+        assert(!panelHas("ctx|abc12345"));
+        liuqinMetaclassWitness("pub");                      // pub is the last chance
+        assert(panelHas("ctx|"));
+        assert(panelHas("tok=abc12345 tail"));
+        printf("F7(panel scroll): evidence replayed at pub only, back on the photo\n");
+    }
+
+    family.superClassLink = &ioService;
+    NativeUfsBlock::gMetaClass.superClassLink = &family;
+    liuqin_metaclass_super_fix = nullptr;
+    liuqin_metaclass_poison_report = nullptr;
     printf("ALL SIM ASSERTIONS PASS\n");
     return 0;
 }

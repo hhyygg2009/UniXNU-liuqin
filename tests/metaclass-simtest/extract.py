@@ -36,6 +36,30 @@ def transform(text, label):
             print(f'transform[{label}]: {old.strip()} -> {new.strip()}')
     return text
 
+USB = ROOT / 'patches/xnu/zzz-liuqin-usb-debug.patch'
+H16 = ROOT / 'patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch'
+
+
+def added_span(text, begin, end, label, source):
+    """A production span that ships inside a patch: find both markers among the added lines,
+    take everything between them, and strip the leading '+'.
+
+    Used for code that lives in libkern rather than in the driver, so the patch text *is* the
+    production source and the sim runs the code the kernel runs: the one-megabyte console mirror
+    (lq_ring / lq_append / lq_copy) and the H16-G fingerprint entry point.
+    """
+    lines = text.splitlines(keepends=True)
+    for marker, which in ((begin, 'begin'), (end, 'end')):
+        n = sum(1 for line in lines if line.startswith('+') and marker in line)
+        if n != 1:
+            raise SystemExit(f'{label}: {which} marker found on {n} added lines of {source}, need 1')
+    first = next(i for i, line in enumerate(lines) if line.startswith('+') and begin in line)
+    last = next(i for i, line in enumerate(lines[first:], start=first) if line.startswith('+') and end in line)
+    while not lines[last].rstrip().endswith('}'):
+        last += 1                        # finish the function the end marker lives in
+    return ''.join(line[1:] if line.startswith('+') else '' for line in lines[first:last + 1])
+
+
 src = DRIVER.read_text()
 
 pieces = {
@@ -48,8 +72,17 @@ pieces = {
     # the witness itself, which is also the repair path used at U59
     'witness.inc': span(src, 'static void liuqinMetaclassWitness (const char *phase)',
                         '  liuqin_milestone ("U", depth < 0 ? "mc-bad" : "mc-ok");\n}\n'),
+    # the mirror the fingerprint searches: production lq_ring / lq_append / lq_copy
+    'ring.inc': added_span(USB.read_text(), '#ifndef LQ_RING_SIZE', '\t*pos += n;',
+                           'ring.inc', USB.name),
+    # the libkern half of H16-G: the report hook and its bounded call site
+    'report.inc': added_span(H16.read_text(),
+                             'extern "C" void (*liuqin_metaclass_poison_report)',
+                             'liuqin_metaclass_poison_report(tag, me,',
+                             'report.inc', H16.name),
 }
 
+SOURCES = {'ring.inc': USB.name, 'report.inc': H16.name}
 write = '--write' in sys.argv[1:]
 stale = []
 for name, body in pieces.items():
@@ -59,7 +92,7 @@ for name, body in pieces.items():
         stale.append(name)
         if write:
             path.write_text(body)
-    print(f'{name}: {len(body.splitlines())} lines from {DRIVER.name}')
+    print(f'{name}: {len(body.splitlines())} lines from {SOURCES.get(name, DRIVER.name)}')
 
 if stale:
     print(('REWROTE' if write else 'DRIFT (re-run with --write)') + ': ' + ', '.join(stale),

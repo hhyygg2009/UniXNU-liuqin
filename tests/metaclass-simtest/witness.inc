@@ -7,6 +7,9 @@ static void liuqinMetaclassWitness (const char *phase)
 
   if (depth < 0) {
     const void *wasBad = bad;              // the walk resets badOut once the chain is fine
+    if (liuqin_metaclass_poison_report) {
+      liuqinMetaclassPoisonReport (phase, sh, (unsigned long long) (uintptr_t) wasBad);
+    }
     const void *fix = liuqin_block_super_fix ("NativeUfsBlock");
     verdict = "unfixable";
     if (fix) {
@@ -25,5 +28,10 @@ static void liuqinMetaclassWitness (const char *phase)
   __builtin_snprintf (line, sizeof line, "M:mc %s %s p=%p link=%p vt=%p sz=%u depth=%d\n",
       phase, verdict, (const void *) sh, sh->superClassLink, sh->vtable, sh->classSize, depth);
   liuqin_debug_puts (line);
+  // H16-G, last chance for the evidence: pub is the final witness of the boot, so replay the
+  // producer line found earlier here (phase is "pub", never "pre", without needing strcmp).
+  if (liuqinFpEvidence[0] && phase[0] == 'p' && phase[1] == 'u') {
+    liuqin_debug_puts (liuqinFpEvidence);
+  }
   liuqin_milestone ("U", depth < 0 ? "mc-bad" : "mc-ok");
 }

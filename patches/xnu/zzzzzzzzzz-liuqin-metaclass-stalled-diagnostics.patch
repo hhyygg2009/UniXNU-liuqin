@@ -1,7 +1,7 @@
 diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 --- a/libkern/c++/OSMetaClass.cpp
 +++ b/libkern/c++/OSMetaClass.cpp
-@@ -87,6 +87,155 @@
+@@ -87,6 +87,184 @@
  	kMakingDictionaries = 2
  } sBootstrapState = kNoDictionaries;
  
@@ -153,11 +153,40 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 +	return liuqin_ptr_ok(name) ? (const char *)name : "";
 +}
 +
++/*
++ * liuqin (H16-G): fingerprint the poison while it is still there.
++ *
++ * v38 proved the word scribbled over superClassLink is eight bytes of text, so the value is
++ * worth more rendered as characters than as a pointer -- and the console mirror
++ * (bsd/dev/liuqin_debug.c) still holds everything this kernel has printed. The report is
++ * installed by the driver that owns the poisoned class (liuqinInstallMetaclassFix in
++ * drivers/ShengUfs/NativeUfs.cpp), which also means a board without that driver keeps the
++ * H16-F output byte for byte. Called strictly before the repair, and at most
++ * LIUQIN_FINGERPRINT_MAX times: the panel keeps only the last lines, so volume here costs
++ * evidence everywhere else.
++ */
++extern "C" void (*liuqin_metaclass_poison_report) (const char *tag, const void *obj,
++    unsigned long long bad) = NULL;
++
++#define LIUQIN_FINGERPRINT_MAX 2
++static unsigned int liuqinFingerprints;
++
++__attribute__((noinline)) static void
++liuqin_fingerprint(const char *tag, const OSMetaClass *me, const void *bad)
++{
++	if (liuqin_metaclass_poison_report == NULL ||
++	    liuqinFingerprints >= LIUQIN_FINGERPRINT_MAX) {
++		return;
++	}
++	liuqinFingerprints++;
++	liuqin_metaclass_poison_report(tag, me, (unsigned long long) (uintptr_t) bad);
++}
++
 +
  static const int      kClassCapacityIncrement = 40;
  static const int      kKModCapacityIncrement  = 10;
  static OSDictionary * sAllClassesDict;
-@@ -798,6 +947,14 @@
+@@ -798,6 +976,14 @@
  	sStalled->count    = 0;
  	sStalled->kextIdentifier = kextIdentifier;
  
@@ -172,7 +201,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  	// keep sStalledClassesLock locked until postModLoad
  
  	return sStalled;
-@@ -826,6 +983,12 @@
+@@ -826,6 +1012,12 @@
  		goto finish;
  	}
  
@@ -185,7 +214,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  	if (sStalled->result) {
  		result = sStalled->result;
  	} else {
-@@ -876,8 +1039,27 @@
+@@ -876,8 +1068,27 @@
  			 * We only release the OSSymbol if we store the kext.
  			 */
  			IOLockLock(sAllClassesLock);
@@ -213,7 +242,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  				OSMetaClass * orig = OSDynamicCast(OSMetaClass,
  				    sAllClassesDict->getObject((const char *)me->className));
  
-@@ -897,14 +1079,51 @@
+@@ -897,14 +1108,54 @@
  					result = kOSMetaClassDuplicateClass;
  					break;
  				}
@@ -226,6 +255,9 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 +				const void    *liuqinBadLink = NULL;
 +				int          liuqinDepth = liuqin_chain_depth(me, &liuqinBadLink);
 +				if (liuqinDepth < 0) {
++					/* liuqin (H16-G): render the poison as text and look for it in
++					 * the console mirror before anything overwrites it. */
++					liuqin_fingerprint("scan", me, liuqinBadLink);
 +					/* liuqin (H16-F): give the owning driver a chance to supply the
 +					 * link-time superclass before deciding to lose the class. */
 +					const void *liuqinFix = liuqin_metaclass_super_fix != NULL
@@ -270,7 +302,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  			IOLockUnlock(sAllClassesLock);
  
  			/* Bail if we didn't go through the entire list of new classes
-@@ -919,6 +1138,11 @@
+@@ -919,6 +1170,11 @@
  			for (i = 0; i < sStalled->count; i++) {
  			        OSMetaClass * me = sStalled->classes[i];
  
