@@ -37,6 +37,13 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   调用点就这两处）。普通 `kprintf/printf` **不进镜像**，而补丁里有 `printf("LIUQIN USB: …=%08x…")`
   这类 8 位十六进制打印。所以 `M:fp … ring clean` 只能排除"我们自己里程碑流的复制"，
   **不能证明"不是控制台文本"**（v40 实机就是这么写过头一格的，见 boot-rounds 的 v40 实机判读）。
+- **原厂 kernelcache 的 VA 不能直接当绑定用。** `scripts/build-liuqin-ufs-bindings.py` 从
+  21H461 的 cache 里解出家族元类/vtable/方法地址，但我们的 fileset 布局把**四个 kext 段都
+  搬低 16 MiB**，而 `__PRELINK_INFO` 搬 +0x774000 —— 既不能用原厂 VA，也不能用一个统一
+  slide。唯一正确的做法是按 `out/liuqin/kernel/kernel.json` 的 `coalesced_segments` **逐段
+  映射**；落在原厂 kernel 本体段里的对象（继承自内核的 vtable/方法）**不要绑绝对地址**，
+  交回链接期按符号名解析。H16 追了五天"谁涂写了 superClassLink"，真相是绑定指向了
+  `__common` 里别人的存储（见 boot-rounds 的 v41 根因节）。
 - **内核补丁是否真的进像，用反汇编证明，不要用源码 diff 证明。** H16-F/G 这条已经有现成的
   一条命令：`python3 scripts/audit-h16f-image.py`（42 项：符号、格式串、postModLoad 的钩子载入/
   `blr`/下界比较/`str [obj+0x10]`/二次走链/两个点名分支、元类构造函数里两次装钩子的

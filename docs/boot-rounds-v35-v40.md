@@ -258,3 +258,72 @@ Failed to mount root device @IOKitBSDInit.cpp:989
   （首个差异偏移）——"同一份内容、另一个地方" vs "另一个类"。
 - ring 覆盖面：把 `kprintf/printf` 的字节也 append 进镜像，并打印 `mirror=` 实际覆盖字节数；
   之后 `clean` 才有"不是任何控制台文本"的分量。
+
+---
+
+## v41 判读 + 根因：H16 从来不是"涂写"，是绑定用错了地址空间
+
+v41 第二轮（IMG_7130–7137）终于拍到 `K49 → U59` 那一页，三条新行把整条线翻盘：
+
+```
+M:alien held p=0xfffffff006add1d0 link=0xfffffff007ae0c00 name=… sz=144
+M:alien want p=0xfffffff007add1d0 link=0x3066666666666666 name=0x3061303861313730 sz=542037209
+M:alien delta=-16777216 slide=0x0 cmp=1 off=0x0
+M:fp scan ring hits=2 self=0 lost=0 at=3927 after=31 total=3966
+M:fp scan ctx|0xfffffff007ae36c0 cnt=172 c0=0xfffffff007c1c130 c1=0xfffffff0071…
+```
+
+`slide=0x0` 判死"单边 slide"；`cmp=1 off=0x0`（第一个字节就不同）判死"同一对象的副本"。
+而 `want=` 那行才是钥匙：**我们链接期引用的那个"家族对象"自己就是垃圾**——它的
+`link/name/sz` 是 ASCII 与荒谬数字，因为 `0xfffffff007add1d0` 在我们的镜像里**不是家族
+元类**，而是 `__common`(BSS, 0x07a50000–0x07ae3828) 中间别人的存储。
+
+静态一查到底（`scripts/build-liuqin-ufs-bindings.py` 生成的 `original-bindings.S`）：
+
+```
+.globl __ZN20IOBlockStorageDevice10gMetaClassE
+.set __ZN20IOBlockStorageDevice10gMetaClassE, 0xfffffff007add1d0     ← 原厂 21H461 kernelcache 的 VA
+```
+
+而 `out/liuqin/kernel/kernel.json` 的 `coalesced_segments` 说我们自己的布局是：
+
+| 段 | 原厂 cache | 我们的镜像 | 位移 |
+|---|---|---|---|
+| `__PRELINK_TEXT` | `0xfffffff00527c000` | `0xfffffff00427c000` | **−0x1000000** |
+| `__PLK_TEXT_EXEC` | `0xfffffff005920000` | `0xfffffff004920000` | **−0x1000000** |
+| `__PLK_DATA_CONST` | `0xfffffff006ca0000` | `0xfffffff005ca0000` | **−0x1000000** |
+| `__PRELINK_DATA` | `0xfffffff007adc000` | `0xfffffff006adc000` | **−0x1000000** |
+| `__PRELINK_INFO` | `0xfffffff007c30000` | `0xfffffff0083a4000` | **+0x774000** |
+
+**四个 kext 段全部低 16 MiB，而 `__PRELINK_INFO` 是另一个方向**——所以既不能用原厂 VA，
+也不能用一个统一 slide，必须**按段映射**。脚本里那句 `slide = 0` + 注释"raw original-cache
+VAs，不像 mondrian 那样重排"是错的假设，它让**每一条**绑定都偏 16 MiB：
+
+| 绑定 | 现在写进镜像 | 按段映射应为 |
+|---|---|---|
+| `IOBlockStorageDevice::gMetaClass` | `0xfffffff007add1d0` | `0xfffffff006add1d0` |
+| `__ZTV20IOBlockStorageDevice` | `0xfffffff007ae0c00` | `0xfffffff006ae0c00` |
+| `requestIdleEv` 等方法槽 | `0xfffffff00596f050` | `0xfffffff00496f050` |
+
+于是整条 H16 链条一次性解释干净：
+
+1. 驱动构造时把 `superClassLink` 设成幻影地址（原厂 VA）；
+2. 扫描走链时把幻影地址当 OSMetaClass 解引用，读到的是**邻居静态变量的字节**——那些字节
+   含文本缓冲，所以"毒值"看起来像 ASCII（`079f721c`、`ffffffff0`、`0718a0a0`），而且
+   **随启动时序变**（v41 第一次拍到 `bad=0`，第二次 `bad=1`），这正好解释了此前所有"偶发"；
+3. `M:fp … ring hits=2` 的"生产者"就是我们自己的 `M:stalled/M:fp` 输出被邻居缓冲携带——
+   不是谁涂写，是**读错了地方**；
+4. v39 的"修复"把幻影地址写回去（`now=0x07add1d0`、`depth=-2`）——它一直在往错的目标修；
+5. gate 拿注册表里的真对象（`0x06add1d0`）与幻影（`0x07add1d0`）比 → `base-alien` →
+   拒绝发布 → `Failed to mount root device`。
+
+### 修法（v42）
+
+`build-liuqin-ufs-bindings.py` 的 placement 段改成：kext 段按 `coalesced_segments` 逐段位移；
+落在原厂 **kernel 本体**段里的（继承自内核的 vtable/方法）**不绑绝对地址**，交回链接期按
+符号名解析。报告里新增 `segment_deltas` / `emitted_metaclass` / `emitted_vtable` /
+`inherited_kernel_bindings`，并打印每条数据绑定的 `original -> emitted`。
+
+可证伪的预测：v42 之后 `M:bad[170]` 与 `M:alien` 都应消失，出现
+`NativeUfs: base class IOBlockStorageDevice live size …, compiled size …` + `U:base-ok`，
+然后**第一次**看到 APFS 挂载的真实结果。

@@ -14,8 +14,10 @@ same evidence class minus the live snapshot:
     (refer/IOStorageFamily @ e45fbe30, Darwin 23) compiled as a reference
     object with the kernel's own compile record (annotation only, never
     linked or executed);
-  * the prelink placement rule of the auto-slide wrapper, cross-checked
-    against the slide recorded in out/liuqin/kernel/kernel.json.
+  * the prelink placement rule: original-cache VAs are mapped per segment onto
+    the layout recorded in out/liuqin/kernel/kernel.json (coalesced_segments),
+    because our fileset emitter moves every kext segment by -0x1000000 and
+    __PRELINK_INFO by +0x774000; kernel-proper objects are left to the link.
 
 Method after UniXNU-mondrian scripts/derive-ios16-storage-bindings.py
 (Redmi K60, same SM8475 family), adapted to 21H461/Darwin 23 and to the
@@ -212,28 +214,81 @@ def main():
         fail('storage base destructor layout changed')
 
     # ---- 6. placement semantics --------------------------------------------
-    # liuqin's prelink keeps the original cache bytes in place (the emit step
-    # reports "executable bytes unchanged") and slides the WHOLE cache by the
-    # board-pinned value at load time.  Kernel and kexts therefore share one
-    # address space, so the bindings are the raw original-cache VAs; there is
-    # no auto-slide repacking of the prelink bundle as on mondrian.
-    slide = 0
+    # Every address derived above is a VA inside the PINNED ORIGINAL kernelcache,
+    # because that is the image the metaclass getter, the vtable and the method
+    # pointers were decoded out of.  The image we ship does not keep them there:
+    # the fileset emitter lays the prelink segments where its own coalescing
+    # decides, and on liuqin that is 16 MiB below the original for all four
+    # kext segments, while __PRELINK_INFO moves by +0x774000.  So a single slide
+    # is the wrong shape and the raw original VAs are simply wrong.
+    #
+    # This is what H16 actually was.  The old code said "slide = 0, bindings use
+    # raw cache VAs" and set IOBlockStorageDevice::gMetaClass to 0xfffffff007add1d0
+    # -- an address that, in our image, is not the family metaclass at all but
+    # the middle of __common, i.e. other people's statics.  The driver's
+    # superClassLink therefore pointed at unrelated storage; the scan read the
+    # bytes there as a poisoned chain (which is why the "poison" looked like
+    # ASCII and changed between boots), the v39 heal wrote the same wrong value
+    # back, and the gate compared the registry's real object (0xfffffff006add1d0)
+    # against the phantom and refused root publication.  Device evidence:
+    # docs/boot-rounds-v35-v40.md, v41 (M:alien delta=-16777216 slide=0x0 cmp=1).
     base = min(s['va'] for s in kernel['segments'] if s['name'].startswith('__PRELINK') and s['size'])
-    fixed = base
     kernel_json = ROOT.parent / 'kernel/kernel.json'
-    if kernel_json.is_file():
-        recorded = json.loads(kernel_json.read_text())
-        print(f'board slide {recorded.get("slide", 0):#x} applies uniformly at load; '
-              f'bindings use raw cache VAs (prelink base {base:#x})')
+    if not kernel_json.is_file():
+        fail(f'no prelink report at {kernel_json}; build the kernel once so the emitted '
+             'segment layout is recorded, then re-run this script')
+    recorded = json.loads(kernel_json.read_text())
+    ours = {seg['name']: seg['va'] for seg in recorded.get('coalesced_segments', [])}
+    if not ours:
+        fail('the prelink report carries no coalesced_segments; refusing to guess placement')
+    deltas = {seg['name']: ours[seg['name']] - seg['va'] for seg in kernel['segments']
+              if seg['size'] and seg['name'] in ours}
+    if not deltas:
+        fail('no original-cache segment name matches the emitted image')
+
+    inherited: dict[str, str] = {}
+
+    def relocate(va):
+        """An original-cache VA -> what the driver should reference instead.
+
+        Returns the emitted address for anything inside a kext segment (all of
+        which move, per segment, in our layout), or None for anything inside the
+        original *kernel*: that object exists in our own kernel too, under the
+        same symbol name, so pinning it to a number would re-introduce exactly
+        the bug this function exists to fix.  None means "leave it to the link".
+        """
+        home = [seg for seg in kernel['segments']
+                if seg['size'] and seg['va'] <= va < seg['va'] + seg['size']]
+        if not home:
+            fail(f'binding address {va:#x} is not inside any original-cache segment')
+        seg = max(home, key=lambda item: item['va'])
+        if seg['name'] in deltas:
+            return va + deltas[seg['name']]
+        if not exports.get(va, []):
+            fail(f'original segment {seg["name"]} (holding {va:#x}) has no counterpart in '
+                 'the emitted image and no symbol name to reference instead')
+        return None
+
+    print('prelink base ' + hex(base) + '; relocating bindings per segment: '
+          + ', '.join(f'{name} {delta:+#x}' for name, delta in sorted(deltas.items())))
 
     # ---- 7. optional live verification from the QEMU snapshot ---------------
     live = False
     if args.snapshot.is_file():
         d = json.loads(args.snapshot.read_text())
         service_meta = next(va for va, names in exports.items() if '__ZN9IOService10gMetaClassE' in names)
-        actual = bytes.fromhex(d['memory'].get(f'{meta:x}:50', ''))
-        service = bytes.fromhex(d['memory'].get(f'{service_meta:x}:50', ''))
-        if (len(actual) == 0x50 and len(service) == 0x50 and
+        # relocate() answers None for anything in the kernel proper, and IOService's
+        # metaclass is exactly that: the snapshot cannot confirm a placement we no longer
+        # pin, so the live check only runs when both sides are kext-side addresses.
+        at_meta, at_service = relocate(meta), relocate(service_meta)
+        if at_meta is None or at_service is None:
+            print('live snapshot skipped: the superclass lives in the kernel proper and is '
+                  'resolved by the link, so there is no pinned address to compare against')
+        else:
+            actual = bytes.fromhex(d['memory'].get(f'{at_meta:x}:50', ''))
+            service = bytes.fromhex(d['memory'].get(f'{at_service:x}:50', ''))
+        if (at_meta is not None and at_service is not None and
+                len(actual) == 0x50 and len(service) == 0x50 and
                 struct.unpack_from('<Q', actual, 16)[0] == service_meta and
                 struct.unpack_from('<I', actual, 32)[0] == CLASS_SIZE and
                 struct.unpack_from('<I', service, 32)[0] == IO_SERVICE_CLASS_SIZE):
@@ -242,19 +297,32 @@ def main():
         else:
             print('live snapshot present but not conclusive (kernel may have faulted early); keeping derived record')
 
-    bindings = {name: pointers[i] + slide for i, name in enumerate(methods)
+    # The whole point of section 6: bind to where the family object IS, not to
+    # where the original cache had it.  Both the data symbols and the method
+    # slots move together, so a driver call lands in the right kext.
+    bindings = {name: relocate(pointers[i]) for i, name in enumerate(methods)
                 if name not in known and name != '___cxa_pure_virtual'}
-    bindings.update({'__ZN20IOBlockStorageDevice10gMetaClassE': meta + slide,
-                     '__ZTV20IOBlockStorageDevice': table + slide,
-                     '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': constructor + slide,
-                     '__ZN20IOBlockStorageDeviceD2Ev': destructor + slide})
+    emitted = {'__ZN20IOBlockStorageDevice10gMetaClassE': relocate(meta),
+               '__ZTV20IOBlockStorageDevice': relocate(table),
+               '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': relocate(constructor),
+               '__ZN20IOBlockStorageDeviceD2Ev': relocate(destructor)}
+    bindings.update(emitted)
+    for name, original, value in (
+            ('__ZN20IOBlockStorageDevice10gMetaClassE', meta, emitted['__ZN20IOBlockStorageDevice10gMetaClassE']),
+            ('__ZTV20IOBlockStorageDevice', table, emitted['__ZTV20IOBlockStorageDevice']),
+            ('__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass', constructor, emitted['__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass']),
+            ('__ZN20IOBlockStorageDeviceD2Ev', destructor, emitted['__ZN20IOBlockStorageDeviceD2Ev'])):
+        print(f'  binding {name}: {original:#x} -> {value:#x}')
 
     report = dict(build='21H461', darwin='23.6.0', device='liuqin (iPad7,1)',
                   public_source_revision=revision, source_sha256=digest((source / 'IOBlockStorageDevice.cpp').read_bytes()),
                   reference_object_sha256=digest(blob), reference_object_executed_or_linked=False,
                   method_slots=SLOTS, pure_virtual_slots=PURE_VIRTUAL, inherited_kernel_methods=matched,
                   kernel_bindings=matched, compiled_public_class_size=CLASS_SIZE,
-                  prelink_base=hex(base), fixed_prelink_base=hex(fixed), slide=hex(slide),
+                  prelink_base=hex(base),
+                  segment_deltas={name: hex(delta) for name, delta in sorted(deltas.items())},
+                  emitted_metaclass=hex(emitted['__ZN20IOBlockStorageDevice10gMetaClassE']),
+                  emitted_vtable=hex(emitted['__ZTV20IOBlockStorageDevice']),
                   vtable=hex(table), original_metaclass=hex(meta),
                   original_protected_constructor=hex(constructor), original_base_destructor=hex(destructor),
                   abstract_complete_destructors_trap=True, live_native_4k=live,
@@ -298,9 +366,12 @@ def main():
                 name = data[st + ix:data.index(b'\0', st + ix)].decode()
                 if 'IOBlockStorageDevice' in name:
                     undefined.append(name)
-    missing = [name for name in undefined if name not in bindings]
+    missing = [name for name in undefined if name not in bindings and name not in inherited]
     if missing:
         fail('undefined driver imports without a derived binding: ' + ', '.join(missing[:6]))
+    if inherited:
+        print(f'  {len(inherited)} import(s) left to the link (kernel-proper objects): '
+              + ', '.join(sorted(inherited)[:4]))
     assembly = ufs / 'original-bindings.S'
     assembly.write_text(''.join(f'.globl {name}\n.set {name}, {bindings[name]:#x}\n'
                                  for name in sorted(set(undefined))))
