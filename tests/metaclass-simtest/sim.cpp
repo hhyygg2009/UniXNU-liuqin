@@ -1,11 +1,14 @@
-// Host simulation of the liuqin H16 metaclass-duplicate gate.
+// Host simulation of the liuqin H16 metaclass family: the base-class policy, the
+// scan that used to drop the poisoned slot, and the H16-F repair that keeps it.
+//
+// Three files are extracted verbatim from the production driver by extract.py
+// (helper.inc, witness.inc, gate.inc); the only substitution that script makes is
+// liuqinPtrOk's address floor, which cannot mean anything on a host address space.
+// The scan loop below mirrors OSMetaClass::postModLoad's first pass in
+// patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch, and the
+// harness deliberately calls the production liuqin_block_super_fix() through the
+// same function-pointer variable the patched kernel uses.
 #include <cstdarg>
-// Stubs model XNU's OSMetaClass registry and reproduce postModLoad's duplicate
-// branch (the iOS panic path) so we can prove:
-//   1. WITHOUT the gate, allocating a NativeUfsBlock registers a second
-//      "IOBlockStorageDevice" name and postModLoad faults exactly like on device;
-//   2. WITH the gate, startRoot refuses before any allocation, no duplicate is
-//      ever registered, and boot continues.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -14,118 +17,132 @@
 #include <vector>
 
 // ---- stub IOKit world ------------------------------------------------------
-struct MetaClass {                       // stands in for OSMetaClass
-    std::string name;                    // className (C string pre-symbol)
-    void *reserved = nullptr;            // ExpansionData* — freed poison on orig
+struct OSSymbol;
+
+// OSMetaClass with the arm64 field order the v37 disassembly confirmed:
+// vtable, reserved, superClassLink (+0x10), className (+0x18), classSize (+0x20).
+struct OSMetaClass {
+    void        *vtable = nullptr;
+    void        *reserved = nullptr;          // ExpansionData*
+    OSMetaClass *superClassLink = nullptr;
+    const char  *className = nullptr;         // a C string until the second pass
+    unsigned int classSize = 0;
+
+    const char *getClassName() const { return className; }
+    unsigned int getClassSize() const { return classSize; }
+    static const OSMetaClass *getMetaClassWithName(const OSSymbol *name);
 };
-struct Symbol { std::string s; void release() const {} };
-struct OSSymbolStub : Symbol {};
 
-static std::vector<MetaClass*> gAllClasses;      // sAllClassesDict by name
-static std::vector<MetaClass*> gStalled;         // sStalled->classes
-static bool gPoisonFreed = false;
-static bool gFaulted = false;                // reserved freed at registration?
-
-struct FakeKext { const char *id; };
-static FakeKext gKernelKext{"__kernel__"};
-
-// IOStorageFamily's class, registered during the closure's __kernel__ load pass.
-static MetaClass ioBlockStorageDevice{"IOBlockStorageDevice", nullptr};
-static MetaClass ioService{"IOService", nullptr};
-
-static void registerDuringKernelPass(MetaClass *mc) {
-    // preModLoad("__kernel__") recorded it; postModLoad inserts into sAllClassesDict.
-    if (!mc->reserved) mc->reserved = new int(1);           // ExpansionData alloc
-    gStalled.push_back(mc);
-}
-static bool postModLoad(bool emulate_freed_poison) {
-    // duplicate check pass
-    for (size_t i = 0; i < gStalled.size(); i++) {
-        MetaClass *me = gStalled[i];
-        MetaClass *orig = nullptr;
-        for (auto *c : gAllClasses) if (c->name == me->name) orig = c;
-        if (orig) {
-            // iOS path: panic("... duplicate ...", ((OSKext*)orig->reserved->kext)->getIdentifierCString())
-            if (emulate_freed_poison && !orig->reserved) {
-                printf("FAULT: Kernel data abort reading orig->reserved (freed ExpansionData)\n");
-                gFaulted = true;                           // the device crash shape
-                return false;                              // panic window hit
-            }
-            printf("PANIC would fire: Kext __kernel__ class %s is a duplicate\n", me->name.c_str());
-            return false;
-        }
-    }
-    for (auto *me : gStalled) gAllClasses.push_back(me);
-    gStalled.clear();
-    return true;
-}
-
-// ---- v38 (H16-E) model: the scan over sStalled->classes[] ------------------
-// Mirrors the patched XNU logic field-for-field so the control flow we ship is the
-// control flow we test. OSMetaClass's real arm64 layout, confirmed against the v37
-// disassembly (className = [x24,#0x18], superClassLink = [x24,#0x10]).
-struct MetaClass2 {
-    void        *vtable;                    // +0x00
-    void        *reserved;                  // +0x08
-    MetaClass2  *superClassLink;            // +0x10
-    const char  *className;                 // +0x18
-    unsigned     classSize;                 // +0x20
+// The family the driver is compiled against. sizeof() is the "compiled" side of the ABI
+// check and the recorded classSize the "live" side; the panel says sz=248.
+struct IOBlockStorageDevice {
+    static OSMetaClass gMetaClass;
+    char pad[248];   // sizeof(IOBlockStorageDevice) == 248 == the panel's sz=
 };
-static const int CHAIN_MAX = 64;
-// The host model has no kernel VA range, so "plausible kernel pointer" is modelled as
-// membership in a synthetic image: every object we hand the scan is registered here,
-// and anything else (like the 0x6131373030666666 poison word) reads as garbage.
+struct NativeUfsBlock {
+    static OSMetaClass gMetaClass;
+};
+OSMetaClass IOBlockStorageDevice::gMetaClass;
+OSMetaClass NativeUfsBlock::gMetaClass;
+
+struct OSSymbol {
+    const char *s = nullptr;
+    void release() const {}
+    static const OSSymbol *withCString(const char *c);
+};
+
+static std::vector<OSMetaClass*> gAllClasses;              // sAllClassesDict
+// the global the patched OSMetaClass.cpp defines; the driver writes it, the scan reads it
+extern "C" const void *(*liuqin_metaclass_super_fix)(const char *className) = nullptr;  // -Wextern-initializer is expected: the harness owns this global
+
+const OSMetaClass *OSMetaClass::getMetaClassWithName(const OSSymbol *name)
+{
+    for (auto *c : gAllClasses) if (c->className && name && !strcmp(c->className, name->s)) return c;
+    return nullptr;
+}
+const OSSymbol *OSSymbol::withCString(const char *c)
+{
+    static OSSymbol st;
+    st.s = c;
+    return &st;
+}
+
+// The synthetic image: ptr_ok means "an object this image actually contains", which is
+// what the kernel's "above the kernel text base" test means on device. The ASCII word
+// 0x6131373030666666 from the panel is deliberately not in it.
 static std::vector<const void*> gImage;
 static void addToImage(const void *p) { gImage.push_back(p); }
-static inline bool ptr_ok(const void *p) {
+static inline bool liuqinSimPtrOk(const void *p)
+{
     if (!p) return true;
     for (auto *q : gImage) if (q == p) return true;
     return false;
 }
 
-// liuqin_chain_depth(): returns hops, or -(hops before the bad link) + badOut set.
-static int chain_depth(const MetaClass2 *entry, const void **badOut) {
-    const void *cur = entry;
-    int hops = 0;
-    *badOut = nullptr;
-    while (cur) {
-        if (!ptr_ok(cur)) { *badOut = cur; return -hops; }
-        cur = ((const MetaClass2 *)cur)->superClassLink;
-        if (++hops > CHAIN_MAX) { *badOut = cur; return -hops; }
-    }
-    return hops;
+static const char *gMilestoneTag = "", *gMilestoneMsg = "";
+static void liuqin_milestone(const char *t, const char *m)
+{
+    gMilestoneTag = t; gMilestoneMsg = m;
+    printf("milestone %s:%s\n", t, m);
 }
+static void liuqin_debug_puts(const char *s) { fputs(s, stdout); }
+static volatile const char *native_ufs_root_failure = nullptr;
+static unsigned simSkipGate = 0;                 // boot-arg stand-in, see below
+static void PE_parse_boot_argn(const char *, unsigned *out, unsigned) { *out = simSkipGate; }
 
+// The extracted production code (driver side, H16-F):
+#include "helper.inc"
+#include "witness.inc"
+
+// ---- the mirrored first pass of OSMetaClass::postModLoad --------------------
 static unsigned gDeepest = 0;
-// naive = v35/v37 XNU (unvalidated walk, faults on a poisoned link);
-// guarded = v38 (validate, name, NULL the slot, keep going). Returns bad count, or
-// -1 when the naive walk actually faulted.
-static int scanPass(std::vector<MetaClass2*> &stalled, std::vector<MetaClass2*> &all,
-                    bool naive) {
-    int bad = 0;
+static bool gHealInScan = true;                  // the H16-F branch
+// naive = the unpatched walk (v35..v37), guarded = the shipped scan (v38), and with
+// gHealInScan the v39 behaviour. Returns the number of dropped slots, -1 when the naive
+// walk actually faulted, -2 when the duplicate branch fired.
+static int scanPass(std::vector<OSMetaClass*> &stalled, std::vector<OSMetaClass*> &all,
+                    bool naive, unsigned *healedOut = nullptr)
+{
+    int bad = 0, healed = 0;
     for (size_t i = 0; i < stalled.size(); i++) {
-        MetaClass2 *me = stalled[i];
-        if (me && !ptr_ok(me)) { stalled[i] = nullptr; bad++; continue; }   // M:dirty
+        OSMetaClass *me = stalled[i];
+        if (me && !liuqinPtrOk(me)) { stalled[i] = nullptr; bad++; continue; }   // M:dirty
         if (!me) continue;
         for (auto *c : all) if (c->className && me->className &&
-                                 !strcmp(c->className, me->className)) {
+                                !strcmp(c->className, me->className)) {
             printf("PANIC would fire: duplicate %s\n", me->className); return -2;
         }
-        if (naive) {                       // the v37 fault shape
-            while ((me = me->superClassLink)) {
-                if (!ptr_ok(me)) {         // next iteration reads [me+0x10] -> abort
-                    printf("FAULT: data abort at postModLoad+0x2d4, x24=%p "
-                           "(far=x24+0x10)\n", (void*)me);
+        if (naive) {                              // the v37 fault shape
+            OSMetaClass *walk = me;
+            while ((walk = walk->superClassLink)) {
+                if (!liuqinPtrOk(walk)) {
+                    printf("FAULT: data abort at postModLoad+0x2d4, x24=%p (far=x24+0x10)\n",
+                           (void*)walk);
                     return -1;
                 }
             }
             continue;
         }
         const void *badLink = nullptr;
-        int depth = chain_depth(me, &badLink);
-        if (depth < 0) {                   // M:bad[i] bad-chain, then skip
-            printf("M:bad[%zu] bad-chain n=%s bad=%p\n", i, me->className, badLink);
-            stalled[i] = nullptr; bad++; continue;
+        int depth = liuqinChainDepth(me, &badLink);
+        if (depth < 0) {
+            // verbatim in intent with the patched scan: ask the driver for the link-time
+            // superclass, validate, write it, re-walk; keep the class when that works.
+            const void *fix = (gHealInScan && liuqin_metaclass_super_fix)
+                ? liuqin_metaclass_super_fix(me->className) : nullptr;
+            if (fix && liuqinPtrOk(fix)) {
+                me->superClassLink = const_cast<OSMetaClass*>((const OSMetaClass*)fix);
+                badLink = nullptr;
+                depth = liuqinChainDepth(me, &badLink);
+                if (depth > 0) {
+                    printf("M:bad[%zu] fixed n=%s bad=%p\n", i, me->className, fix);
+                    healed++;
+                }
+            }
+            if (depth < 0) {
+                printf("M:bad[%zu] bad-chain n=%s bad=%p\n", i, me->className, badLink);
+                stalled[i] = nullptr; bad++; continue;
+            }
         }
         if ((unsigned)depth > gDeepest) gDeepest = (unsigned)depth;
     }
@@ -133,115 +150,179 @@ static int scanPass(std::vector<MetaClass2*> &stalled, std::vector<MetaClass2*> 
         for (auto *me : stalled) if (me) all.push_back(me);
         stalled.clear();
     }
+    if (healedOut) *healedOut = (unsigned)healed;
     return bad;
 }
 
-// ---- driver-side stubs -----------------------------------------------------
-static Symbol *symbol_pool = nullptr;
-static OSSymbolStub* withCString(const char *s) { static OSSymbolStub st; st.s = s; return &st; }
-static MetaClass* getMetaClassWithName(const Symbol *name) {
-    for (auto *c : gAllClasses) if (c->name == static_cast<const OSSymbolStub*>(name)->s) return c;
-    return nullptr;
-}
-static const char *gMilestoneTag = "", *gMilestoneMsg = "";
-static void liuqin_milestone(const char *t, const char *m) { gMilestoneTag=t; gMilestoneMsg=m; printf("milestone %s:%s\n", t, m); }
-static void liuqin_debug_puts(const char *s) { fputs(s, stdout); }
-static volatile const char *native_ufs_root_failure = nullptr;
-
-
-// ---- XNU-named shims so helper.inc compiles verbatim ----
-class OSSymbol { public: std::string s; void release() const {}
-  static OSSymbol * withCString(const char *c){ static OSSymbol st; st.s=c; return &st; } };
-class OSMetaClass { public: std::string name; void *reserved=nullptr;
-  const char *getClassName() const { return name.c_str(); }
-  static OSMetaClass * getMetaClassWithName(const OSSymbol *n); };
-
-extern std::vector<MetaClass*> gAllClasses;
-OSMetaClass* OSMetaClass::getMetaClassWithName(const OSSymbol *n){
-  for (auto *c : gAllClasses) if (c->name == n->s) return reinterpret_cast<OSMetaClass*>(c);
-  return nullptr;
+// startRoot's prologue, extracted verbatim (calls the witness and the policy above).
+static bool startRootPrologue()
+{
+    native_ufs_root_failure = nullptr;
+#include "gate.inc"
+    return true;
 }
 
-// The extracted production code:
-#include "helper.inc"
-
-// ---- scenarios --------------------------------------------------------------
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    // Closure bootstrap: IOStorageFamily's own IOBlockStorageDevice gets registered
-    // (name taken), then its ExpansionData is NOT freed here — but on real iOS 17
-    // the duplicate branch reads orig->reserved->kext where reserved was kfree'd
-    // for classes whose kext link failed; our device crash showed far=poison,
-    // i.e. Apple's typed-free poison pattern. Model the faulting read directly.
-    registerDuringKernelPass(&ioBlockStorageDevice);
-    registerDuringKernelPass(&ioService);
-    assert(postModLoad(false));                     // closure pass succeeds
-    delete (int*)ioBlockStorageDevice.reserved;
-    ioBlockStorageDevice.reserved = nullptr;        // freed by OSKext teardown path
+    addToImage(&IOBlockStorageDevice::gMetaClass);
+    addToImage(&NativeUfsBlock::gMetaClass);
+    // Class names are pointers the image must contain (on device they are __TEXT cstrings;
+    // the repair hook validates them before comparing). Own the storage so the addresses
+    // are stable, and let the pool do whatever it likes with literals.
+    char nameOurs[] = "NativeUfsBlock", nameFamily[] = "IOBlockStorageDevice";
+    char nameShort[] = "NativeUfsBlo", nameOther[] = "SomethingElse";
+    addToImage(nameOurs); addToImage(nameFamily); addToImage(nameShort); addToImage(nameOther);
+    // witness.inc passes the literal "NativeUfsBlock" exactly as the driver does; identical
+    // literals share one address within a translation unit, so registering it here models
+    // the __TEXT cstring the kernel would be pointing at.
+    addToImage("NativeUfsBlock");
 
-    // Scenario A: NO gate — the observed device shape. The driver object links against a
-    // "second copy" of IOBlockStorageDevice (the offline-bindings alias): its metaclass is
-    // constructed with the className pointer ALREADY pointing at the OSSymbol interned under
-    // "IOBlockStorageDevice" (sAllClassesDict holds that symbol as its own key). postModLoad
-    // then finds orig == that very symbol entry and takes the iOS panic branch, reading
-    // orig->reserved where Apple left the freed poison word -> far = 0x315f776569765f65.
-    MetaClass dup{"IOBlockStorageDevice", nullptr};      // NativeUfsBlock's aliased name
-    registerDuringKernelPass(&dup);
-    bool ok = postModLoad(true);                         // emulate reserved-poison read
-    printf("A(no gate): postModLoad ok=%d -> boot %s\n", ok, ok?"continues":"DIES at restartable_init");
-    assert(!ok);                                         // reproduces the crash
-
-    assert(gFaulted);   // scenario A really walked into the faulting branch
-
-    // Scenario B: WITH the gate — helper sees the name taken BEFORE any alloc happens.
-    gStalled.clear(); gFaulted = false;               // driver never got to stall a dup
-    // exercise the gate exactly as startRoot's prologue does (gate.inc is that snippet)
+    // ---- scenario A: the dead theory, kept as documentation -----------------
+    // v35..v36c believed a second "IOBlockStorageDevice" name in the batch was the crash:
+    // postModLoad's duplicate branch panics, and the panic format dereferences
+    // orig->reserved->kext after Apple freed that ExpansionData. Model it once, so the
+    // record of why the gate existed is executable.
     {
-        if (!liuqinBaseClassFree ()) {
-            native_ufs_root_failure = "IOBlockStorageDevice metaclass name already registered";
-        }
+        OSMetaClass family{};
+        family.className = nameFamily;
+        std::vector<OSMetaClass*> all{&family};
+        OSMetaClass dup{}; dup.className = nameFamily;               // the aliased name
+        addToImage(&family); addToImage(&dup);
+        std::vector<OSMetaClass*> stalled{&dup};
+        int r = scanPass(stalled, all, /*naive=*/false);
+        printf("A(duplicate theory): result=%d -> the panic branch, not the chain\n", r);
+        assert(r == -2);
     }
-    bool free_gate = !native_ufs_root_failure;   // true == would have proceeded
-    printf("B(gate): refused=%d failure=%s\n", !free_gate,
-           native_ufs_root_failure ? native_ufs_root_failure : "(none)");
-    assert(!free_gate);
-    assert(native_ufs_root_failure);
-    assert(std::string(gMilestoneMsg) == "base-dup");
 
-    // Scenario C: clean board (no IOStorageFamily in the closure): gate opens.
-    gAllClasses.clear();
-    native_ufs_root_failure = nullptr;
-    assert(liuqinBaseClassFree());
-    printf("C(closed-world): gate opens when the name is free\n");
-
-    // Scenario D: the v37/v38 shape -- a CLEAN stalled array whose one entry has an
-    // ASCII-poisoned superClassLink (x24 = 0x6131373030666666 = "ffff007a" on the panel).
-    // D1 must reproduce the data abort; D2 (the shipped policy) must name the slot, drop
-    // it and carry on registering everything else.
+    // ---- scenario B: the v36 gate was a false positive; v39's policy is not ----
+    // Same closure state that produced I60:base-dup on v36c/v37/v38: the name is taken,
+    // by the family itself. The policy must now OPEN, and report the ABI sizes.
     {
-        MetaClass2 root{nullptr, nullptr, nullptr,      "IOService",             152};
-        MetaClass2 good{nullptr, nullptr, &root,        "IOBlockStorageDevice",  248};
-        MetaClass2 evil{nullptr, nullptr, (MetaClass2*)0x6131373030666666ULL, "NativeUfsBlock", 248};
-        addToImage(&root); addToImage(&good); addToImage(&evil);
-        std::vector<MetaClass2*> batch{&good, &evil};
-        std::vector<MetaClass2*> dict;
+        gAllClasses.clear();
+        IOBlockStorageDevice::gMetaClass.className = nameFamily;
+        IOBlockStorageDevice::gMetaClass.classSize = 248;      // the sz= the panel printed
+        IOBlockStorageDevice::gMetaClass.superClassLink = nullptr;
+        gAllClasses.push_back(&IOBlockStorageDevice::gMetaClass);
+        liuqinInstallMetaclassFix();                            // as the metaclass ctor does
+        NativeUfsBlock::gMetaClass.superClassLink = nullptr;    // v39 has not scribbled yet
+        assert(startRootPrologue());
+        assert(!native_ufs_root_failure);
+        assert(std::string(gMilestoneMsg) == "base-ok");
+        printf("B(family prelinked): publication allowed, milestone %s:%s\n", gMilestoneTag, gMilestoneMsg);
 
+        // size skew against the same name: reported on the panel, still not fatal
+        IOBlockStorageDevice::gMetaClass.classSize = 232;
+        assert(startRootPrologue());
+        assert(std::string(gMilestoneMsg) == "base-abi");
+        IOBlockStorageDevice::gMetaClass.classSize = 248;
+
+        // a second class registered under the family's name still refuses: the dictionary
+        // key matches (that is what a duplicate looks like), only the object differs
+        OSMetaClass alien{}; alien.className = nameFamily; alien.classSize = 248;
+        gAllClasses.clear(); gAllClasses.push_back(&alien); addToImage(&alien);
+        assert(!startRootPrologue());
+        assert(native_ufs_root_failure);
+        assert(std::string(gMilestoneMsg) == "base-alien");
+        printf("B(alien holder): refused, milestone %s:%s\n", gMilestoneTag, gMilestoneMsg);
+    }
+
+    // ---- scenario C: closed world (no IOStorageFamily in roots) ---------------
+    {
+        gAllClasses.clear();
+        assert(startRootPrologue());
+        assert(!native_ufs_root_failure);
+        assert(std::string(gMilestoneMsg) == "base-free");
+        printf("C(closed-world): gate opens when the name is unclaimed\n");
+    }
+
+    // ---- scenario D: the v37/v38 shapes --------------------------------------
+    // The batch is the real one: the family object that __kernel__ registers, and ours.
+    // D1 must reproduce the abort; D2 (v38's policy, repair switched off) must drop exactly
+    // the poisoned slot and keep the rest of the batch registered.
+    OSMetaClass ioService{}; ioService.className = nameOther; ioService.classSize = 152;
+    ioService.superClassLink = nullptr;
+    addToImage(&ioService);
+    OSMetaClass &family = IOBlockStorageDevice::gMetaClass;
+    family.className = nameFamily;
+    family.classSize = 248;
+    NativeUfsBlock::gMetaClass.className = nameOurs;
+    NativeUfsBlock::gMetaClass.classSize = 248;
+    const void *poison = (const void*)0x6131373030666666ULL;          // "ffff007a" on the panel
+
+    {
+        ioService.superClassLink = nullptr;
+        family.superClassLink = &ioService;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass*)poison;   // v38's readout
+        std::vector<OSMetaClass*> batch{&family, &NativeUfsBlock::gMetaClass}, dict;
         int r1 = scanPass(batch, dict, /*naive=*/true);
         printf("D1(v37 XNU): scan result=%d -> %s\n", r1,
                r1 == -1 ? "DIES at postModLoad+0x2d4" : "survives");
-        assert(r1 == -1);                       // same instruction, same fault
+        assert(r1 == -1);
 
-        dict.clear(); gDeepest = 0;
-        int r2 = scanPass(batch, dict, /*naive=*/false);
+        // v38's policy with the repair switched off: name it, drop it, carry on.
+        gHealInScan = false;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass*)poison;
+        dict.clear(); batch = {&family, &NativeUfsBlock::gMetaClass}; gDeepest = 0;
+        int r2 = scanPass(batch, dict, false);
         printf("D2(v38 policy): bad=%d registered=%zu deepest=%u -> boot continues\n",
                r2, dict.size(), gDeepest);
-        assert(r2 == 1);                        // exactly the one poisoned slot dropped
-        assert(dict.size() == 1 && dict[0] == &good);
-        assert(gDeepest == 2);                  // depth semantics preserved (entry+root)
+        assert(r2 == 1);
+        assert(dict.size() == 1 && dict[0] == &family);
+        assert(gDeepest == 2);
+        gHealInScan = true;
     }
 
-    // scenario C world cleanup (avoid harness-only leak reports)
-    for (auto *c : gAllClasses) if (c->reserved) { delete (int*)c->reserved; c->reserved=nullptr; }
+    // ---- scenario E: H16-F ---------------------------------------------------
+    // E1: the scan heals, so the class is registered instead of lost.
+    {
+        family.superClassLink = &ioService;
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass*)poison;
+        std::vector<OSMetaClass*> batch{&family, &NativeUfsBlock::gMetaClass}, dict;
+        gDeepest = 0;
+        unsigned healed = 0;
+        int bad = scanPass(batch, dict, false, &healed);
+        printf("E1(v39 scan): bad=%d healed=%u registered=%zu deepest=%u\n", bad, healed,
+               dict.size(), gDeepest);
+        assert(bad == 0 && healed == 1);
+        assert(dict.size() == 2);
+        assert(NativeUfsBlock::gMetaClass.superClassLink == &family);   // the link-time object
+        assert(gDeepest == 3);
+    }
+    // E2: the scribble is still there at U59 (nothing healed it): the witness repairs it,
+    // so the first isMemberOf() cannot fault.
+    {
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass*)poison;
+        liuqinInstallMetaclassFix();
+        liuqinMetaclassWitness("pre");
+        assert(NativeUfsBlock::gMetaClass.superClassLink == &family);
+        assert(std::string(gMilestoneMsg) == "mc-ok");
+        printf("E2(witness at U59): field repaired before any allocation\n");
+    }
+    // E3: never hand back an unverifiable superclass. If the family object's own chain is
+    // the poisoned one, the fix must refuse and the scan must fall back to dropping.
+    {
+        family.superClassLink = (OSMetaClass*)poison;
+        const void *fix = liuqin_block_super_fix(nameOurs);
+        printf("E3(unwalkable family): fix=%p\n", fix);
+        assert(fix == nullptr);
+        NativeUfsBlock::gMetaClass.superClassLink = (OSMetaClass*)poison;
+        std::vector<OSMetaClass*> batch{&family, &NativeUfsBlock::gMetaClass}, dict;
+        unsigned healed = 99;
+        int bad = scanPass(batch, dict, false, &healed);
+        assert(bad == 2 && healed == 0 && dict.empty());
+        family.superClassLink = &ioService;
+        printf("E3: both slots dropped, nothing registered, boot still alive (bad=%d)\n", bad);
+    }
+    // E4: another class must not be able to borrow our superclass.
+    {
+        family.superClassLink = &ioService;
+        assert(liuqin_block_super_fix(nameFamily) == nullptr);
+        assert(liuqin_block_super_fix(nameShort) == nullptr);
+        assert(liuqin_block_super_fix(nameOther) == nullptr);
+        assert(liuqin_block_super_fix(nullptr) == nullptr);
+        assert(liuqin_block_super_fix(nameOurs) == &family);
+        printf("E4(name match is exact): foreign and truncated names get nothing\n");
+    }
     printf("ALL SIM ASSERTIONS PASS\n");
     return 0;
 }

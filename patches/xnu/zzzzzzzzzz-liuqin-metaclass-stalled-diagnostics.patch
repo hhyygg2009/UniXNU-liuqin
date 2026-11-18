@@ -1,7 +1,7 @@
 diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 --- a/libkern/c++/OSMetaClass.cpp
 +++ b/libkern/c++/OSMetaClass.cpp
-@@ -87,6 +87,125 @@
+@@ -87,6 +87,155 @@
  	kMakingDictionaries = 2
  } sBootstrapState = kNoDictionaries;
  
@@ -123,11 +123,41 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 +	liuqin_debug_puts(line);
 +}
 +
++/*
++ * liuqin (H16-F): repair a scribbled superClassLink instead of dropping the class.
++ *
++ * The only assignment to that field anywhere in libkern is OSMetaClass's constructor, and
++ * the v38 panel proved the value sitting in it was eight bytes of console text -- so
++ * something wrote over the object after its constructor had already run. Dropping the
++ * slot (v38) keeps the boot alive but leaves the class half-born: no entry in
++ * sAllClassesDict, className never converted to an OSSymbol, reserved->kext never set, and
++ * the very first isMemberOf()/OSDynamicCast() on it repeats the walk that just faulted.
++ * On liuqin that means no block device, no media, no root.
++ *
++ * A driver statically linked into __kernel__ knows its own superclass at link time, so it
++ * can hand that pointer back. The hook is installed by the driver's metaclass constructor
++ * -- by the same constructors that filled sStalled -- so it is in place before this scan
++ * can possibly run. Anything it returns is validated exactly like everything else here:
++ * inside the image, with its own ancestor chain walkable. No hook, or a bad answer, keeps
++ * v38's behaviour (name the slot, drop it, carry on).
++ */
++extern "C" const void *(*liuqin_metaclass_super_fix) (const char *className) = NULL;
++
++/* Until postModLoad's second pass runs, className is still the raw C string the
++ * constructor stored (see the "hack alert" in OSMetaClass's constructor), not a symbol. */
++__attribute__((noinline)) static const char *
++liuqin_slot_name(const OSMetaClass *me)
++{
++	const void *name = ((const liuqin_meta_shim *)me)->className;
++
++	return liuqin_ptr_ok(name) ? (const char *)name : "";
++}
++
 +
  static const int      kClassCapacityIncrement = 40;
  static const int      kKModCapacityIncrement  = 10;
  static OSDictionary * sAllClassesDict;
-@@ -798,6 +917,14 @@
+@@ -798,6 +947,14 @@
  	sStalled->count    = 0;
  	sStalled->kextIdentifier = kextIdentifier;
  
@@ -142,7 +172,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  	// keep sStalledClassesLock locked until postModLoad
  
  	return sStalled;
-@@ -826,6 +953,12 @@
+@@ -826,6 +983,12 @@
  		goto finish;
  	}
  
@@ -155,11 +185,12 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  	if (sStalled->result) {
  		result = sStalled->result;
  	} else {
-@@ -876,8 +1009,26 @@
+@@ -876,8 +1039,27 @@
  			 * We only release the OSSymbol if we store the kext.
  			 */
  			IOLockLock(sAllClassesLock);
 +			unsigned int liuqinBad = 0;
++			unsigned int liuqinFixed = 0;
  			for (i = 0; i < sStalled->count; i++) {
  				const OSMetaClass * me = sStalled->classes[i];
 +				/* liuqin (H16-D/E): a slot below the kernel text base is a corrupted
@@ -182,7 +213,7 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
  				OSMetaClass * orig = OSDynamicCast(OSMetaClass,
  				    sAllClassesDict->getObject((const char *)me->className));
  
-@@ -897,14 +1048,27 @@
+@@ -897,14 +1079,51 @@
  					result = kOSMetaClassDuplicateClass;
  					break;
  				}
@@ -195,10 +226,26 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 +				const void    *liuqinBadLink = NULL;
 +				int          liuqinDepth = liuqin_chain_depth(me, &liuqinBadLink);
 +				if (liuqinDepth < 0) {
-+					liuqin_slot_dump(i, me, liuqinBadLink, " bad-chain");
-+					sStalled->classes[i] = NULL;
-+					liuqinBad++;
-+					continue;
++					/* liuqin (H16-F): give the owning driver a chance to supply the
++					 * link-time superclass before deciding to lose the class. */
++					const void *liuqinFix = liuqin_metaclass_super_fix != NULL
++					    ? liuqin_metaclass_super_fix(liuqin_slot_name(me)) : NULL;
++					if (liuqinFix != NULL && liuqin_ptr_ok(liuqinFix)) {
++						((liuqin_meta_shim *)me)->superClassLink = liuqinFix;
++						liuqinBadLink = NULL;
++						liuqinDepth = liuqin_chain_depth(me, &liuqinBadLink);
++						if (liuqinDepth > 0) {
++							/* bad= now carries the pointer that was installed */
++							liuqin_slot_dump(i, me, liuqinFix, " fixed");
++							liuqinFixed++;
++						}
++					}
++					if (liuqinDepth < 0) {
++						liuqin_slot_dump(i, me, liuqinBadLink, " bad-chain");
++						sStalled->classes[i] = NULL;
++						liuqinBad++;
++						continue;
++					}
  				}
 -				if (depth > sDeepestClass) {
 -				        sDeepestClass = depth;
@@ -212,10 +259,18 @@ diff --git a/libkern/c++/OSMetaClass.cpp b/libkern/c++/OSMetaClass.cpp
 +			liuqin_stalled_report(liuqinBad ? "scan BAD" : "scan ok",
 +			    loadHandle, liuqinBad, (void *)(uintptr_t)sStalled->count,
 +			    (void *)(uintptr_t)sDeepestClass);
++			/* liuqin (H16-F): the line that must survive the panic screen: dropped
++			 * versus repaired, so the next photo decides whether registration happened. */
++			{
++				char line[80];
++				__builtin_snprintf(line, sizeof line, "M:scan done bad=%u healed=%u cnt=%u deep=%u\n",
++				    liuqinBad, liuqinFixed, sStalled->count, sDeepestClass);
++				liuqin_debug_puts(line);
++			}
  			IOLockUnlock(sAllClassesLock);
  
  			/* Bail if we didn't go through the entire list of new classes
-@@ -919,6 +1083,11 @@
+@@ -919,6 +1138,11 @@
  			for (i = 0; i < sStalled->count; i++) {
  			        OSMetaClass * me = sStalled->classes[i];
  
