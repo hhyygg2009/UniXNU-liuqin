@@ -50,7 +50,7 @@ next_action = [
 evidence = [
     { kind = "source", reference = "board.toml", result = "Board identity, archives, roots, payload and userdata values as listed above." },
     { kind = "host", command = "./unixnu build kernel", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "https://github.com/hhyygg2009/UniXNU-liuqin", result = "rc=0, kernel.macho sha256 49247f07d0dd1fd13a7749d433b20895808ab45994c39b19349ee27bcbf8f76b" },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel shows the config line, the UniXNU boot menu and the kernel milestones, so the recorded configuration reaches the device." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Panel shows the config line, the UniXNU boot menu and the kernel milestones, so the recorded configuration reaches the device." },
 ]
 
 [[area]]
@@ -88,7 +88,7 @@ next_action = [
 ]
 evidence = [
     { kind = "source", reference = "docs/vendor-inputs.md", result = "154 vendor inputs extracted from the stock UEFI plus the uefiplat.cfg values." },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel: config: \\EFI\\UniXNU\\unixnu.toml, READY TO ENTERQUEST, HANDOFF EXIT RETURN 0x0, DARWINBOOT: hand-off to the kernel, video base 0xB8000000 1800x2880 row 7200 bytes 32 bpp." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Panel: config: \\EFI\\UniXNU\\unixnu.toml, READY TO ENTERQUEST, HANDOFF EXIT RETURN 0x0, DARWINBOOT: hand-off to the kernel, video base 0xB8000000 1800x2880 row 7200 bytes 32 bpp." },
 ]
 
 [[area]]
@@ -122,7 +122,7 @@ next_action = [
     "Measure whether the four efficiency cores come online individually (add a per-CPU milestone to the ArmCpu bring-up and photograph the panel).",
 ]
 evidence = [
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel milestones K31-K49 then K50-K57 with no CPU-related abort; ID registers and quantum lines printed." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Panel milestones K31-K49 then K50-K57 with no CPU-related abort; ID registers and quantum lines printed." },
 ]
 
 [[area]]
@@ -157,7 +157,7 @@ next_action = [
     "Once the root mounts, re-measure the free/wired page counts and the UFS DMA window against the userdata range to confirm the cache policy on writes.",
 ]
 evidence = [
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel: vm_page_bootstrap: 47007 free pages, 1729 wired pages; K8:zalloc zone dump; M:stalled pre cnt=0 c0=0 c1=0." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Panel: vm_page_bootstrap: 47007 free pages, 1729 wired pages; K8:zalloc zone dump; M:stalled pre cnt=0 c0=0 c1=0." },
 ]
 
 [[area]]
@@ -194,19 +194,27 @@ completion = [
     "Root: the configured volume mounts and launchd starts. Persistence: writes survive reboot within the allocated Data region.",
 ]
 limits = [
-    "Root is not mounted. The kernel prints Failed to mount root device @IOKitBSDInit.cpp:989 because NativeUfsBlock was dropped from the batch and the gate refused publication.",
+    "Root is not mounted yet. v38 dropped NativeUfsBlock from the batch and the old gate refused publication; v39 (H16-F) heals the field and registers the class instead, and v40 (H16-G) identifies the writer. Both are built, and the tablet is not on the bench, so no boot has exercised either.",
     "No write path has been exercised, so Data persistence is unverified.",
-    "Who writes eight bytes of console text over NativeUfsBlock::gMetaClass + 0x10 is still unknown; the driver's own neighbouring statics are excluded (native_ufs_extra_atos/dpu_smmu/dpu_state/dpu_check abut the object exactly and are all uint32).",
+    "Who writes eight bytes of console text over NativeUfsBlock::gMetaClass + 0x10 is still unknown, but it is no longer a guess between two hypotheses. The driver's own neighbouring statics are excluded (native_ufs_extra_atos/dpu_smmu/dpu_state/dpu_check abut the object exactly and are all uint32), and the only libkern statement that touches the field at all is OSMetaClass's constructor (superClassLink = inSuperClass). v39 brackets the window (M:mc pre / M:mc pub re-read the field); v40 names the producer: the value is printed as characters, and the same eight bytes are searched for in the 1 MiB console mirror, which still holds every line this kernel printed -- hits/self/lost plus at/after/total and 64 bytes of context say which line, and how long before the scan it was written.",
 ]
 next_action = [
-    "Rework registration to the proven late shape: hand-written MetaClass subclass with a runtime-filled superClass pointer taken from the registered IOBlockStorageDevice, explicit preModLoad(g_kernel_kmod_info.name) / construct / postModLoad(handle), a re-fire latch, and a getClassSize() ABI gate; print the superClassLink before and after so the scribble is bracketed.",
+    "Boot boot-liuqin-v40-fingerprint.img (69,525,504 B, sha256 5cee607ec7eee16c112463d9d88e907a2c717c890228cbbd05882f235e31c2fa) the moment the tablet is back -- releases/watch-v40.sh does it automatically -- and read releases/v40-NOTES.md. Expected: M:bad[170] fixed plus M:scan done healed=1 (the class is registered, not lost), U:base-ok plus the live/compiled size line (the false-positive gate is gone), and M:fp scan ring hits=1 with a ctx line naming the writer. A clean verdict means the poison is not copied console text; lost= means the mirror wrapped and the search must move earlier; self= with no hits means our own report line is being read as evidence and the classifier is wrong.",
+    "Keep boot-liuqin-v39-heal.img on the bench as the control: it has the same repair without the fingerprint, so an M:fp line that changes the boot's behaviour is a diagnostic bug, not progress.",
 ]
 evidence = [
     { kind = "source", reference = "drivers/ShengUfs/NativeUfs.cpp", result = "startRoot, the H16 gate (liuqinBaseClassFree), the SMMU/DPU measurement arrays and the metaclass definition." },
     { kind = "source", reference = "patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch", result = "The H16-E scan: per-slot naming, bounded ancestor-chain validation, skip-instead-of-refuse, and the summary line printed last." },
     { kind = "host", command = "python3 drivers/ShengUfs/tests/check_legacy_descriptors.py --output /tmp/out --compiler g++", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "drivers/ShengUfs/tests/check_legacy_descriptors.py", result = "PASS 14 legacy/current descriptor comparisons" },
     { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "cbbb7b13e5ebe51bd2f02c716455d04f37feacfe", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS, including D1 (v37 abort reproduced) and D2 (v38 scan drops exactly one slot)." },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "M:bad[170] bad-chain p=0xfffffff007ae36b0 vt=0xfffffff0072086d0 sz=248 n=NativeUfsBlock bad=0x3135205b0a293061; M:stalled scan BAD cnt=1; U59:start-root_init then I60:base-dup; Failed to mount root device @IOKitBSDInit.cpp:989." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "M:bad[170] bad-chain p=0xfffffff007ae36b0 vt=0xfffffff0072086d0 sz=248 n=NativeUfsBlock bad=0x3135205b0a293061; M:stalled scan BAD cnt=1; U59:start-root_init then I60:base-dup; Failed to mount root device @IOKitBSDInit.cpp:989." },
+    { kind = "source", reference = "drivers/ShengUfs/NativeUfs.cpp", revision = "c36c575fe0a06216a884f75cf443e7666a9357b5", result = "v39 (H16-F): liuqin_block_super_fix hands the scan the link-time &IOBlockStorageDevice::gMetaClass; liuqinBaseClassCheck replaces liuqinBaseClassFree (object identity decides, not the name); liuqinMetaclassWitness brackets the scribble at U59." },
+    { kind = "host", command = "./unixnu build kernel && python3 scripts/audit-h16f-image.py", revision = "f78ad26ba7a765dadc7af9317574f8b8a923dd00", reference = "scripts/audit-h16f-image.py", result = "AUDIT PASS 12/12 on kernel.macho sha256 b261c1b60e97c7a47ca740470c6e0570dba35ddc3e4a9e9546d9be26e2422671: hook global 0xfffffff007adfcb8; postModLoad +0x36c slot load, +0x380 blr, +0x384 image-floor compare, +0x394 str x0,[x28,#0x10], +0x3a0 second chain walk, two slot_dump branches; metaclass ctor passes 0xf8 and stores &liuqin_block_super_fix (adr -19132 -> 0xfffffff0079d5750) into the hook slot." },
+    { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "f78ad26ba7a765dadc7af9317574f8b8a923dd00", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS: A, B (base-ok / base-abi / base-alien), C, D1/D2, E1 healed-and-registered, E2 witness repairs, E3 refuses an unwalkable pointer, E4 exact name match." },
+    { kind = "source", reference = "drivers/ShengUfs/NativeUfs.cpp", revision = "8abb519", result = "v40 (H16-G): liuqinEightText renders the poison in memory order, liuqinRingFind searches the mirror through liuqin_debug_copy only (256-byte chunks, seven-byte rewind, capped rounds, no pointer dereference), liuqinMetaclassPoisonReport searches before it prints and classifies candidates inside its own lines as self=; installed in the same metaclass constructor as the repair." },
+    { kind = "host", command = "./unixnu build kernel && python3 scripts/audit-h16f-image.py", revision = "8c391866a0acb3a0c24da45e32b444a9372bac5a", reference = "scripts/audit-h16f-image.py", result = "AUDIT PASS 42/42 on kernel.macho sha256 0f6b131d70fc230b240662f13db7498eec0541e993a875113ce487ec0b823c3d: report hook slot 0xfffffff007adfcc0, helper 0xfffffff007892d6c loads it, bails, counts and tail-jumps (br x3); postModLoad calls the helper at +0x374, strictly before the repair slot load at +0x37c; the ctor stores &liuqinMetaclassPoisonReport (0xfffffff0079d58c8) into the slot; four liuqin_debug_copy and one liuqin_debug_total inside the report body; three puts inside the witness, so the replay line is real." },
+    { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "8c391866a0acb3a0c24da45e32b444a9372bac5a", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS including F1-F7: producer found with byte-exact at/after/total, fingerprint strictly before the repair, printable needle judged clean then self=1 (no self-hit), wrapped ring reported as lost, offsets taken from the real base after a wrap, lock contention giving up in one copy, two fingerprints then silence, hookless board identical to v39, evidence replayed at pub only. ring.inc and report.inc are extracted from the XNU patches, so the harness searches the kernel's own ring code." },
+    { kind = "host", command = "git apply --reverse --check / --check / round-trip on libkern/c++/OSMetaClass.cpp", revision = "8c391866a0acb3a0c24da45e32b444a9372bac5a", reference = "patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch", result = "reverse-check ok on the built tree, forward-check ok on the result (so it applies to pristine), and re-applying leaves the file byte-identical; the build itself replayed the whole series from a reset tree because the patch stamp changed." },
 ]
 
 [[area]]
@@ -240,7 +248,7 @@ next_action = [
     "After the root mounts, keep the console alive through launchd and then measure the panel's DSI/backlight registers for a real display driver.",
 ]
 evidence = [
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Panel legible from the config line through B103 plus the panic screen (Failed to mount root device @IOKitBSDInit.cpp:989, frames, pages/free)." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Panel legible from the config line through B103 plus the panic screen (Failed to mount root device @IOKitBSDInit.cpp:989, frames, pages/free)." },
 ]
 
 [[area]]
@@ -271,7 +279,7 @@ next_action = [
     "Select the input components and record the first touch report against the panel geometry.",
 ]
 evidence = [
-    { kind = "device", command = "fastboot boot boot-liuqin-v36c-gate.img", revision = "c9065af8297a4f08f2b54621430ce2e700b24347", reference = "docs/boot-rounds-v35-v38.md", result = "Panel shows LIOKEY: btn0 down (rtsts=90) during the boot-menu window." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v36c-gate.img", revision = "c9065af8297a4f08f2b54621430ce2e700b24347", reference = "docs/boot-rounds-v35-v40.md", result = "Panel shows LIOKEY: btn0 down (rtsts=90) during the boot-menu window." },
 ]
 
 [[area]]
@@ -397,7 +405,7 @@ next_action = [
 ]
 evidence = [
     { kind = "source", reference = "package/ShengPlatformPower.cpp", result = "The liuqin platform-power provider wired by commit cd21cfc." },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "K47:bootprofile_init reached and the screen persists with no watchdog reset; the same behaviour holds across v34b-v38." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "K47:bootprofile_init reached and the screen persists with no watchdog reset; the same behaviour holds across v34b-v38." },
 ]
 
 [[area]]
@@ -433,19 +441,19 @@ limits = [
     "Images are only ever loaded with fastboot boot; nothing is flashed, so there is no persistence test of the packaging across reboots.",
 ]
 next_action = [
-    "Keep recording the kernel.macho and boot.img sha256 per round in docs/boot-rounds-v35-v38.md so evidence revisions stay tied to a byte-exact image.",
+    "Keep recording the kernel.macho and boot.img sha256 per round in docs/boot-rounds-v35-v40.md so evidence revisions stay tied to a byte-exact image.",
 ]
 evidence = [
     { kind = "source", reference = "scripts/wrap-payload-mbr.py", result = "Produces the 65 MiB MBR-wrapped payload the firmware's PartitionDxe requires." },
     { kind = "host", command = "./unixnu build kernel && ./unixnu build payload --kernel out/liuqin/kernel/kernel.macho --unique-chip-id 0x84750A0B0C0D0001 && ./unixnu bootimg --fd ... --dtb ... --ramdisk out/liuqin/payload/payload-mbr.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "README.md", result = "boot.img 69,525,504 bytes, sha256 08a01ee150dd0979f99905b278d9b5c66434c1352d7e5b9b23f6e3de0efd2068; kernel.macho sha256 49247f07d0dd1fd13a7749d433b20895808ab45994c39b19349ee27bcbf8f76b" },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "Sending boot.img OKAY, Booting OKAY, and the kernel runs to the mount decision." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "Sending boot.img OKAY, Booting OKAY, and the kernel runs to the mount decision." },
 ]
 
 [[area]]
 id = "diagnostics"
 status = "device-verified"
 components = []
-paths = ["scripts/check-liuqin.py", "tests/metaclass-simtest/**", "tests/liuqin_usb_host_test.c", "docs/liuqin-usb-debug.md", "patches/xnu/zzz-liuqin-usb-debug*.patch", "docs/boot-rounds-v35-v38.md"]
+paths = ["scripts/check-liuqin.py", "scripts/audit-h16f-image.py", "tests/metaclass-simtest/**", "tests/liuqin_usb_host_test.c", "docs/liuqin-usb-debug.md", "patches/xnu/zzz-liuqin-usb-debug*.patch", "docs/boot-rounds-v35-v40.md"]
 inputs = [
     "Panel milestone console (prefixes K, B, U, I, T and M), a 1 MiB log ring and a USB CDC-ACM debug port (LIQDBG001).",
     "Host-side toolchain: llvm-nm/llvm-objdump against the unstripped kernel for offline symbolization.",
@@ -464,6 +472,9 @@ findings = [
     "Register values are decoded as data, not just addresses: far = x24 + 0x10 confirmed the faulting ldr, and x24 = 0x6131373030666666 decoded as the ASCII bytes 'ffff007a' proved the poisoned field held console text.",
     "Diagnostics must be printed last: the panic screen redraws the panel and keeps only the final console lines, so the v38 scan summary is the last line emitted on purpose.",
     "The milestone console never touches storage or locks, so it survives the hang cases that lose the log ring; the USB port adds the full 1 MiB ring when a photograph is not enough.",
+    "A search of the console mirror must answer for its own output: the report prints the needle verbatim inside its asc=\"...\" field whenever the bytes are printable, so searching after printing finds that line, and a self-hit is worse than no hit because it carries a real offset. Search first, then print, and classify any candidate whose preceding 32 bytes contain the asc= field or the bad= field as self=.",
+    "lq_copy clamps a position older than the ring forward to the oldest byte it still holds, so a hit offset has to be taken from pos - got (where the chunk really started), never from the position that was asked for; the difference is the difference between pointing at a line and pointing into memory that was overwritten. The same jump is the only signal that early output is gone, which is why the verdict distinguishes lost from clean from gaveup.",
+    "Evidence printed during the scan cannot be assumed to survive to the photograph: the panic screen keeps only the last lines, so the witness at pub replays the last producer line rather than hoping it is still there.",
 ]
 completion = [
     "Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result.",
@@ -472,12 +483,15 @@ limits = [
     "There is no kernel debugger session; kdb is configured over serial but never attached, so everything is post-mortem from photographs and the ring.",
 ]
 next_action = [
-    "Add the M:reg before/after snapshot to the storage driver so the next round brackets who writes over the metaclass object.",
+    "v39 shipped that bracket as M:mc pre / M:mc pub rather than M:reg: the driver re-reads superClassLink on entry to startRoot and again once every root window is prepared, repairs it in place and prints was=/now=, so one pair of photographs says whether the scribble continues after restartable_init.",
 ]
 evidence = [
     { kind = "source", reference = "docs/liuqin-usb-debug.md", result = "The debug port contract: switch, the four self-test gates and the porting comparison table." },
     { kind = "host", command = "tests/metaclass-simtest/run.sh", revision = "cbbb7b13e5ebe51bd2f02c716455d04f37feacfe", reference = "tests/metaclass-simtest/sim.cpp", result = "ALL SIM ASSERTIONS PASS (scenarios A, B, C and the new D)." },
-    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v38.md", result = "M:stalled pre/post, M:bad[170] and M:stalled scan BAD lines legible on the panel, plus the panic screen with pc/lr/far, registers and frames." },
+    { kind = "source", reference = "tests/metaclass-simtest/README.md", revision = "8c391866a0acb3a0c24da45e32b444a9372bac5a", result = "The harness now runs five extracted includes: three from the driver and two from the XNU patches (the 1 MiB ring itself and the libkern fingerprint call site), plus the mirror model -- liuqin_debug_puts appends then paints, liuqin_debug_copy returns 0 when the lock is held -- and two assertion channels, the mirror for what was printed and a 512-byte panel for what a photograph could still show." },
+    { kind = "host", command = "python3 scripts/audit-h16f-image.py", revision = "f78ad26ba7a765dadc7af9317574f8b8a923dd00", reference = "scripts/audit-h16f-image.py", result = "H16-F AUDIT PASS: 5 symbols, 7 console format strings, 6 disassembly facts inside postModLoad, 4 inside the metaclass constructor. The one-command form of 'prove it by disassembly', written for the rounds when the tablet is not on the bench." },
+    { kind = "host", command = "python3 scripts/audit-h16f-image.py", revision = "8c391866a0acb3a0c24da45e32b444a9372bac5a", reference = "scripts/audit-h16f-image.py", result = "42 checks, and the windows are now cut at symbol boundaries instead of guessed lengths: a guessed window had already been able to borrow a neighbouring function's blr and pass." },
+    { kind = "device", command = "fastboot boot boot-liuqin-v38-chain-dump.img", revision = "1db66fc55c1582d5483ff882456a142e8f972133", reference = "docs/boot-rounds-v35-v40.md", result = "M:stalled pre/post, M:bad[170] and M:stalled scan BAD lines legible on the panel, plus the panic screen with pc/lr/far, registers and frames." },
 ]
 
 [[area]]
