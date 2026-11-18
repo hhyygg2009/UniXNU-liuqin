@@ -193,3 +193,68 @@ v39 让字段重新可用，v40 问的是**谁写的那 8 个字节**。毒值�
 延迟注册"——现在不必猜了：涂写者若仍在活动，`M:fp pub` 会带着它自己的 `hits/self/lost`
 出现在面板上。**为什么先不做延迟注册**：v39 之后字段在受控时刻一定是好的，剩下的唯一未知
 就是"谁写的"，而延迟注册回答不了这个问题，只会把现场搬走。
+
+---
+
+## v40 实机判读（IMG_7119–7123，2026-11-18 20:40 上机）
+
+上机方式：`releases/watch-v40.sh` 在 20:40:39 抓到 serial `19562650`，
+`fastboot boot` → Sending `OKAY 2.384s` / Booting `OKAY 0.287s`，纯内存、没写任何分区。
+
+### 面板读到的关键行（视觉判读，存疑位见注）
+
+```
+M:fp scan p=0xfffffff007ae36c0 w1=… w2=0xfffffff007add1d0 w3=0xfffffff0071373ae
+        bad=6331323766393730 asc="079f721c"
+M:fp scan ring clean self=0 lost=0 total=3985
+M:bad[170] bad-chain p=0xfffffff007ae36c0 vt=0xfffffff0072006d0 sz=248
+           n=NativeUfsBlock bad=0x6331323766393730
+M:scan done bad=1 healed=0 cnt=172 deep=6
+M:fp pre  … bad=6331323766393730 asc="079f721c"
+M:fp pre  ring clean self=1 lost=0 total=7592
+M:mc pre  was=0x6331323766393730 now=0xfffffff007add1d0 depth=-2
+M:mc pre  unfixable p=0xfffffff007ae36c0 link=0xfffffff007add1d0 vt=0xfffffff0072006d0
+          sz=240 depth=-2
+U60:mc-bad
+NativeUfs: IOBlockStorageDevice is held by 0xfffffff006add1d0, not by the compiled
+           family object 0xfffffff007add1d0; root publication refused
+U61:base-alien
+Failed to mount root device @IOKitBSDInit.cpp:989
+```
+
+存疑（摄像头/角度吃掉的位，不影响下面四条结论）：`w1=` 读成 17 位（必有一位多余）、
+`sz=240` 还是 248、`depth=-2`。`scripts/read-panel.py` 可以给这几位分级复核。
+
+### 四条结论，其中三条是这一轮新拿到的
+
+1. **崩溃这条线过去了**：`M:mc pre was=… now=0xfffffff007add1d0` 就是 v39 的修复在现场生效的
+   证据；v40 复现 v38 的"可读挂载失败"，没有 data abort。扫描阶段 `bad=1 healed=0` 说明
+   扫描只报告、修复发生在登记路径——这个分工记下来。
+2. **毒值被符号表点名**：`bad=0x6331323766393730` 的内存字节是 `079f721c`，而
+   `0xfffffff0079f721c` 在 **v40 自己的**符号表里正好是 `_sysctl_register_oid_early` 的起始
+   （`llvm-nm -arch arm64 out/liuqin/kernel/kernel.macho`，EXACT；51,246 个符号铺在约
+   2^24 的地址空间里，随机串撞上某个符号起始的概率约 0.3%）。所以写进指针字段的是
+   **一个内核文本地址的低 8 个十六进制字符**，不是垃圾、也不是巧合级的数字。
+3. **`ring clean` 证明不了"不是控制台文本"——v40-NOTES 那一格写过头了**：ring 的写入者只有
+   `liuqin_debug_putc/puts`（`zzz-liuqin-usb-debug.patch` 里 `liuqin_debug_append` 的全部调用点
+   就这两处），普通 `kprintf/printf` 不进镜像；而补丁里恰恰有
+   `printf("LIUQIN USB: … idr0=%08x …")` 这类 **8 位十六进制**打印。`hits=0 clean` 目前只排除
+   "我们自己里程碑流的复制"。这一条已经进 AGENTS 的硬性约束。
+4. **墙换了，而且它自己报了出来**：挡住根的不再是 H16，而是 `base-alien`——名字表里
+   `IOBlockStorageDevice` 的持有者在 `0xfffffff006add1d0`，驱动链接的是
+   `0xfffffff007add1d0`（v40 nm 确认 = `__ZN20IOBlockStorageDevice10gMetaClassE`，落在
+   `__common`(BSS) 0x07a50000–0x07ae3828）。两个地址**差值正好 0x1000000 = 16 MiB（slide
+   粒度），低 24 位完全相同**；且 `0xfffffff006add1d0` 不在内核镜像的任何段里（最低段
+   VMA 是 `0xfffffff007008360`），也就是说持有者是 **zone 里的对象**（面板上 `M:stalled`
+   的 `c0/c1` 也全在 0x06 段）。两种解释都还活着：
+   (a) 家族 metaclass 被复制/搬进了 zone；
+   (b) 一个 −16 MiB 的 slide 被**单边**应用（运行时算出的指针减了，编译期立即数没减）。
+
+### v41（H16-H）要打印什么——一次照片就能把 (a)/(b) 分开
+
+- `M:alien slide=%p`：直接读 `vm_kernel_slide`（`osfmk/mach/vm_param.h` 导出，arm64 定义在
+  `arm_vm_init.c:105` 的 `SECURITY_READ_ONLY_LATE`）。slide 若非零，(b) 立刻成立。
+- 持有者自己的身份：`M:alien held p= vt= sz= n=`，再加与静态对象前 64 字节的比对结果
+  （首个差异偏移）——"同一份内容、另一个地方" vs "另一个类"。
+- ring 覆盖面：把 `kprintf/printf` 的字节也 append 进镜像，并打印 `mirror=` 实际覆盖字节数；
+  之后 `clean` 才有"不是任何控制台文本"的分量。

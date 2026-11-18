@@ -2,3 +2,5 @@ out/
 .cache/
 *.log
 tests/metaclass-simtest/sim
+__pycache__/
+*.pyc

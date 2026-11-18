@@ -33,6 +33,10 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   命中点前 32 字节内有 `asc="`/`bad=` 要记进 `self=`，不能算生产者；③ **偏移取 `pos-got`
   不是 `started`**——`lq_copy` 会把过旧的位置钳到最老可读字节，用请求位置算出的偏移指向
   已被覆盖的字节，还会白烧轮数；绕回过就报 `lost=`，别报 `clean`。
+- **1 MiB 控制台镜像只包含 `liuqin_debug_puts/putc` 写的字节**（`liuqin_debug_append` 的全部
+  调用点就这两处）。普通 `kprintf/printf` **不进镜像**，而补丁里有 `printf("LIUQIN USB: …=%08x…")`
+  这类 8 位十六进制打印。所以 `M:fp … ring clean` 只能排除"我们自己里程碑流的复制"，
+  **不能证明"不是控制台文本"**（v40 实机就是这么写过头一格的，见 boot-rounds 的 v40 实机判读）。
 - **内核补丁是否真的进像，用反汇编证明，不要用源码 diff 证明。** H16-F/G 这条已经有现成的
   一条命令：`python3 scripts/audit-h16f-image.py`（42 项：符号、格式串、postModLoad 的钩子载入/
   `blr`/下界比较/`str [obj+0x10]`/二次走链/两个点名分支、元类构造函数里两次装钩子的

@@ -1,0 +1,171 @@
+# 面板判读规则 —— docs/panel-rules.toml
+#
+# scripts/read-panel.py --round <r> 用这份表把照片变成结论。规则不是抄 NOTES 的文字：
+# 每一条都对应 releases/<r>-NOTES.md 判读表的一格，改那一格就改这一条。
+# require/forbid 是对**已复原行**的正则（EXACT/FIXED/SYMS/AMBIG/OPEN 都算，RAW 也算原文）；
+# check 从行里取 key=value 比较，op 缺省是 ==。
+# [[signal]] 列这一轮**期望看到**的行，照片里没有就打 MISSING —— 缺哪一行往往就是答案。
+
+[[rule]]
+round = "v40"
+id = "producer-named"
+verdict = "生产者点名：ctx 那行就是被复制进 superClassLink 的文本"
+next = "按 ctx 里的文本找写它的代码；after= 给出它与扫描之间的字节数，用来定位窗口"
+require = ['M:bad\[170\].*fixed', 'M:scan done bad=0 healed=[1-9]', 'M:fp scan ring hits=[1-9]']
+
+[[rule]]
+round = "v40"
+id = "self-copy"
+verdict = "命中的是我们自己已经打印过的里程碑（复制旧缓冲），不是外部涂写"
+next = "拿 ctx 里的 at= 与镜像偏移对照，找那条 memcpy 的目标/源"
+require = ['M:fp scan ring hits=[1-9]', 'M:fp scan ctx\|\s*(M:stalled|M:mc|U[0-9]+:|B[0-9]+:)']
+
+[[rule]]
+round = "v40"
+id = "not-console-text"
+verdict = "毒值不是控制台文本的复制（ring clean，self=0）"
+next = "回到 v39 前的另一条假设：构造函数参数本身就是垃圾 / 外部乱写，改用「参数与钩子来源」对照"
+require = ['M:bad\[170\].*fixed', 'M:fp scan ring clean self=0']
+
+[[rule]]
+round = "v40"
+id = "ring-wrapped"
+verdict = "镜像绕回了：可能回答问题的字节已经被覆盖，clean 不成立"
+next = "把搜索提前到第一次撞坏链时；或先拉大 LQ_RING_SIZE；同时用 USB 调试口把全环拉下来离线搜"
+require = ['M:bad\[170\]', 'M:fp scan ring lost=[1-9]']
+
+[[rule]]
+round = "v40"
+id = "writer-under-lock"
+verdict = "搜索时 log_lock 被占着（gaveup）—— 反过来证明涂写发生在持锁路径上"
+next = "下一轮改成先拷快照再离线搜"
+require = ['M:fp scan ring gaveup']
+
+[[rule]]
+round = "v40"
+id = "attribution-too-weak"
+verdict = "分类器把真生产者判成了我们自己（self>=1 且 hits=0）"
+next = "归属法要更强：记行首，而不是找 asc=\"/bad="
+require = ['M:fp scan ring clean self=[1-9]', 'M:fp scan ring hits=0']
+
+[[rule]]
+round = "v40"
+id = "writer-still-active"
+verdict = "扫描时字段是好的，涂写发生在挂载窗口内（只有 M:fp pub）"
+next = "v39 判读表里「涂写者仍在活动」那一格，现在带了窗口与文本：在挂载路径上找写手"
+require = ['M:fp pub']
+forbid = ['M:fp scan ring', 'M:fp scan p=']
+
+[[rule]]
+round = "v40"
+id = "hook-missing"
+verdict = "有 fixed 但完全没有 M:fp —— 钩子没装或驱动没跑到报告函数"
+next = "llvm-nm 复核 ctor 里那条 str x9,[x8,#0xcc0] 与 adr → 0xfffffff0079d58c8"
+require = ['M:bad\[170\].*fixed']
+forbid = ['M:fp']
+
+[[rule]]
+round = "v40"
+id = "past-the-mount"
+verdict = "登记路径成立，越过 Failed to mount root device：第一次看到挂载的真实结果"
+next = "按挂载的具体失败点查 APFS/卷 UUID；H16 这条可以归档了"
+require = ['U:base-ok|base-ok', 'live size 248, compiled size 248']
+
+# 期望出现的行（不是判读格，缺一行就是一条线索）
+[[signal]]
+round = "v40"
+name = "M:fp scan p=…asc=…"
+pattern = 'M:fp scan p=0x'
+[[signal]]
+round = "v40"
+name = "M:fp scan ring …"
+pattern = 'M:fp scan ring'
+[[signal]]
+round = "v40"
+name = "M:fp scan ctx|…|"
+pattern = 'M:fp scan ctx\|'
+[[signal]]
+round = "v40"
+name = "M:bad[170] fixed"
+pattern = 'M:bad\[170\].*fixed'
+[[signal]]
+round = "v40"
+name = "M:scan done"
+pattern = 'M:scan done bad=\d+ healed=\d+'
+[[signal]]
+round = "v40"
+name = "M:mc pre / pub"
+pattern = 'M:mc (pre|pub)'
+[[signal]]
+round = "v40"
+name = "U:base-ok（登记成功）"
+pattern = 'base-ok'
+[[signal]]
+round = "v40"
+name = "挂载结果"
+pattern = 'Failed to mount root device|at_vfsroot|root-bringup-ok'
+
+# ---------------------------------------------------------------------------
+# v41 (H16-H)：base-alien 的三种解释，一次照片分开
+# ---------------------------------------------------------------------------
+
+[[rule]]
+round = "v41"
+id = "one-sided-slide"
+verdict = "注册表存的是 slide 之后的指针，编译期立即数没有 slide（delta 是负的且 slide 非零）"
+next = "gate 不能按链接期地址比：把 want 也加上 vm_kernel_slide 再比，或改成按内容/祖先认类。v42 定案"
+require = ['M:alien delta=-[0-9]+ slide=(?!0x0)']
+
+[[rule]]
+round = "v41"
+id = "zone-copy"
+verdict = "家族对象被复制进 zone：内容逐字节相同，只是地址差 16 MiB"
+next = "按名字+classSize+祖先链认家族，别按地址；根这一步就能过去"
+require = ['M:alien delta=-16777216 slide=0x0 cmp=0']
+
+[[rule]]
+round = "v41"
+id = "other-class-holds-name"
+verdict = "确实有另一个类持有 IOBlockStorageDevice 这个名字（cmp=1，off 指出第一个不同的字节）"
+next = "按 off/a/b 反推那个对象是什么（前 64 字节里 vtable 与 className 最能定身份）"
+require = ['M:alien delta=.* cmp=1 off=0x']
+
+[[rule]]
+round = "v41"
+id = "wild-registry"
+verdict = "持有者指针没过镜像下限守卫（cmp=-1）：注册表里是野值，回到涂写这条线"
+next = "把 getMetaClassWithName 的返回路径也上钩子，看它在什么时候被写坏"
+require = ['M:alien delta=.* cmp=-1']
+
+[[rule]]
+round = "v41"
+id = "report-not-shipped"
+verdict = "走到了 base-alien 却完全没有 M:alien —— 报告没进像或没跑到那一行"
+next = "先跑 scripts/audit-h16f-image.py 的 H16-H 段，再确认 liuqinAlienReport 的调用在里程碑之后"
+require = ['base-alien']
+forbid = ['M:alien']
+
+[[rule]]
+round = "v41"
+id = "gate-passed"
+verdict = "gate 过了（base-ok / base-abi）：这一轮的问题不再是家族身份"
+next = "看挂载的真实结果：U:base-ok 之后走到哪一步、Failed to mount 的行号变没变"
+require = ['base-ok|base-abi']
+forbid = ['base-alien']
+
+[[signal]]
+round = "v41"
+name = "M:alien held …"
+pattern = 'M:alien held p=0x'
+[[signal]]
+round = "v41"
+name = "M:alien want …"
+pattern = 'M:alien want p=0x'
+[[signal]]
+round = "v41"
+name = "M:alien delta=… slide=… cmp=…（决定性一行）"
+pattern = 'M:alien delta='
+[[signal]]
+round = "v41"
+name = "U61:base-alien"
+pattern = 'base-alien'

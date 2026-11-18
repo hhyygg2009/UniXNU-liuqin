@@ -33,6 +33,7 @@ SYMBOLS = {
     '_liuqin_debug_total': 'the mirror size the search bounds itself with',
     '_liuqin_block_super_fix': 'the driver-supplied repair',
     '_liuqin_base_class_probe': 'the auditable base-class probe',
+    '_vm_kernel_slide': 'the slide H16-H prints next to the delta',
     '__ZN14NativeUfsBlock10gMetaClassE': 'our metaclass object',
     '__ZN20IOBlockStorageDevice10gMetaClassE': 'the family metaclass object',
 }
@@ -47,6 +48,9 @@ STRINGS = [
     b'M:mc %s %s p=%p link=%p vt=%p sz=%u depth=%d',
     b'NativeUfs: base class IOBlockStorageDevice live size %u, compiled size %u',
     b'NativeUfs: IOBlockStorageDevice is held by %p, not by the compiled family object %p',
+    b'M:alien held p=%p link=%p name=%p sz=%u',
+    b'M:alien want p=%p link=%p name=%p sz=%u',
+    b'M:alien delta=%ld slide=%p cmp=%d off=0x%x a=%016llx b=%016llx',
     b' fixed',
 ]
 HEX = re.compile(r'^([0-9a-f]{16}):\t([0-9a-f]{2}[ ])+')
@@ -124,6 +128,8 @@ def main():
     report_addr = addrs.get('_liuqinMetaclassPoisonReport', 0)
     fp_helper = addrs.get('__ZL18liuqin_fingerprintPKcPK11OSMetaClassPKv', 0)
     witness_fn = addrs.get('__ZL22liuqinMetaclassWitnessPKc', 0)
+    alien_fn = addrs.get('_ZL17liuqinAlienReportPK11OSMetaClass', 0)
+    base_check = addrs.get('_ZL20liuqinBaseClassCheckv', 0)
     ordered = sorted(addrs.values())
 
     def window(addr, fallback):
@@ -134,7 +140,8 @@ def main():
 
     want = [(post, post + 0x700, 'postModLoad'), (ctor, ctor + 0x100, 'ctor')]
     for addr, tag, fallback in ((report_addr, 'report', 0xa00), (fp_helper, 'fp-helper', 0x60),
-                                (witness_fn, 'witness', 0x200)):
+                                (witness_fn, 'witness', 0x200), (alien_fn, 'alien', 0x300),
+                                (base_check, 'basecheck', 0x300)):
         if addr:
             lo, hi = window(addr, fallback)
             want.append((lo, hi, tag))
@@ -256,12 +263,55 @@ def main():
               w.count('bl\t_liuqin_debug_puts') >= 3,
               f'{w.count("bl\t_liuqin_debug_puts")} puts in the witness body')
 
+    # ---- H16-H: the base-alien report. Both new functions are static and each has a single
+    #      call site, so the compiler inlines them into _liuqin_base_class_probe -- nm has no
+    #      symbol for them. The proof therefore runs inside the probe's own window, and it
+    #      checks *order* as well as presence: the panel keeps only its tail, so a decisive
+    #      line printed before the refusal message is a line no photo will ever contain.
+    probe = addrs.get('_liuqin_base_class_probe', 0)
+    slide = addrs.get('_vm_kernel_slide', 0)
+    if probe and slide:
+        lo, hi = window(probe, 0x600)
+        pb_lines = instructions(kernel, [(lo, hi, 'probe')])['probe']
+        pb = '\n'.join(pb_lines)
+
+        def site(imm):
+            """Address of the instruction that materialises a cstring at page offset `imm`."""
+            for line in pb_lines:
+                if re.search(r'add\s+x\d+, x\d+, #' + hex(imm) + r'\b', line):
+                    return int(line.split('\t')[0].rstrip(':'), 16)
+            return 0
+
+        held, want, delta, refuse = site(0x7ee), site(0x817), site(0x840), site(0x718)
+        check('H16-H: the probe prints the holder and the compiled object',
+              bool(held and want), f'held@{held:#x} want@{want:#x}')
+        check('H16-H: the probe prints the decisive delta/slide/cmp line', bool(delta),
+              f'delta@{delta:#x}')
+        check('H16-H: the answer line is printed after the refusal message',
+              bool(refuse and delta and delta > refuse),
+              f'refuse@{refuse:#x} < delta@{delta:#x}')
+        mile = [int(l.split('\t')[0].rstrip(':'), 16) for l in pb_lines
+                if 'bl\t_liuqin_milestone' in l]
+        check('H16-H: ...and after the U:base-alien milestone itself',
+              bool(mile) and delta > max(mile), f'last milestone call@{max(mile) if mile else 0:#x}')
+        check('H16-H: the probe reads vm_kernel_slide, not a guess about it',
+              bool(re.search(r'adrp\s+x\d+, -?\d+ ; ' + hex(slide & ~0xfff), pb)) and
+              bool(re.search(r'ldr\s+x\d+, \[x\d+, #' + hex(slide & 0xfff) + r'\]', pb)),
+              f'{slide:#x}')
+        check('H16-H: the 64-byte compare survived inlining', bool(re.search(r'cmp\s+x\d+, #0x40\b', pb)))
+        check('H16-H: the probe puts at least four lines on the panel',
+              pb.count('bl\t_liuqin_debug_puts') >= 4,
+              f'{pb.count("bl\t_liuqin_debug_puts")} puts in the probe body')
+    else:
+        check('H16-H: the base-class probe and vm_kernel_slide are both in the image', False,
+              f'probe={probe:#x} slide={slide:#x}')
 
     print()
     if failures:
         print(f'AUDIT FAILED ({len(failures)}): ' + '; '.join(failures))
         return 1
-    print('H16-F+G AUDIT PASS: the repair and the fingerprint are in the image, provably,\n    without booting it.')
+    print('H16+F+G+H AUDIT PASS: the repair, the fingerprint and the base-alien report are\n'
+          '    in the image, provably, without booting it.')
     return 0
 
 

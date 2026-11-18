@@ -80,7 +80,26 @@ H16 系列（把 v35 起卡在 `K49:PE_init_iokit` 的 data abort 追到底）�
 | v37 | XNU 侧 `M:stalled pre/post` + 脏槽位护栏 | 崩点后移到 `+0x2d4`；面板证明数组本身是干净的 |
 | v38 | 逐槽命名 + 祖先链校验 + **跳过坏槽而非整批拒绝** | **崩溃消失**，启动到达挂载决策 |
 | v39 | **修那个字段**：libkern 侧钩子 + 驱动交出链接期超类地址；策略不再因"名字被占"而拒绝；`M:mc pre/pub` 见证 | 未上机（主机侧 12 项审计 + A–E 仿真全通过） |
-| v40 | **给毒值按指纹**：第二个钩子在修复之前把毒值渲染成字符，并回搜 1 MiB 控制台镜像，报 `hits/self/lost/at/after` + 命中处上下文；证据行由 `witness("pub")` 重放到面板 | 未上机（主机侧 42 项审计 + A–F 仿真全通过；仿真逼出 4 个真缺陷并全部修掉） |
+| v40 | **给毒值按指纹**：第二个钩子在修复之前把毒值渲染成字符，并回搜 1 MiB 控制台镜像，报 `hits/self/lost/at/after` + 命中处上下文；证据行由 `witness("pub")` 重放到面板 | **已上机（IMG_7119–7123）**：修复在现场生效、无崩溃，指纹跑出来了；毒值被符号表点名，而挡住根的换成了 `base-alien` |
+
+v40 实机点名（IMG_7119–7123，2026-11-18 20:40）：
+
+```
+M:fp scan p=0xfffffff007ae36c0 … bad=6331323766393730 asc="079f721c"
+M:fp scan ring clean self=0 lost=0 total=3985
+M:mc pre  was=0x6331323766393730 now=0xfffffff007add1d0 depth=-2
+NativeUfs: IOBlockStorageDevice is held by 0xfffffff006add1d0, not by the compiled
+           family object 0xfffffff007add1d0; root publication refused   → U61:base-alien
+Failed to mount root device @IOKitBSDInit.cpp:989
+```
+
+三件新事实：① 毒值的字节是 `079f721c`，而 `0xfffffff0079f721c` 在 v40 符号表里正是
+`_sysctl_register_oid_early` 的起始——写进指针字段的是**一个内核文本地址的低 8 个十六进制字符**；
+② `ring clean` 只排除了"我们自己里程碑流的复制"，因为 ring 只由 `liuqin_debug_putc/puts` 写，
+`kprintf/printf` 不进镜像（补丁里就有 `%08x` 的打印）；③ 持有 `IOBlockStorageDevice` 名字的对象在
+`0xfffffff006add1d0`，与编译期那个差**正好 16 MiB、低 24 位相同**，且不在内核镜像任何段内（zone 对象）
+——要么家族类被复制进 zone，要么一个 −16 MiB 的 slide 被单边应用。v41 一次照片分开它们。
+逐行判读见 [docs/boot-rounds-v35-v40.md](docs/boot-rounds-v35-v40.md) 的「v40 实机判读」。
 
 v38 实机点名（IMG_7059–7063）：
 
