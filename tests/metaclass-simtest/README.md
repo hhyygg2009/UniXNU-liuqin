@@ -1,15 +1,22 @@
-# OSMetaClass::postModLoad 主机侧仿真
+# 元类哨兵与 base-class gate：主机侧仿真
 
-不交叉编译、不上机就能跑：桩件复刻 XNU 的元类登记批次与 `postModLoad` 第一轮扫描的四条
-分支，把实机照片上的崩溃形状在主机上重现，并验证**驱动侧策略**（`drivers/ShengUfs`）与
-**XNU 侧扫描护栏/修复**（`patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch`）。
+v43 形状。v42 给 H16 结了案——UFS 绑定脚本把原厂 21H461 kernelcache 的 VA 当成我们镜像的 VA
+用了（每个 kext 段低 16 MiB），所以"谁涂写了 `superClassLink`"这个问题从一开始就问错了：
+没有涂写，是**读错了地方**。扫描、修复钩子、指纹搜索全部随诊断一起删除，于是这个 harness
+也不再镜像 `postModLoad` 的扫描分支——**给已经不在像里的代码做仿真等于证明空气**。
+
+现在跑的是三件仍然在承重的事：
+
+1. **走链**：报告一个未验证的指针，但**永远不解引用它**（v35–v37 那句
+   `ldr x24,[x24,#0x10]` 的 abort 就是这么来的），而且撞到环要能封顶；
+2. **gate 的判决表**：家族自己占名 / size 不一致 / 别的对象占名 / 闭包里没有家族 / boot-arg 跳过；
+3. **哨兵只报告、不修**：修好绑定的唯一正确方式是让链接期地址对，而不是运行时写回去。
 
     sh run.sh                     # 期望最后一行 ALL SIM ASSERTIONS PASS
 
-`run.sh` 第一步是 `python3 extract.py`：它从生产源码逐字节重抽五个 `.inc`（驱动里三个，
-XNU 补丁里两个——`ring.inc` 是内核那一兆控制台镜像 `lq_ring/lq_append/lq_copy`，
-`report.inc` 是 H16-G 的 libkern 钩子与调用点），**只要漂移就非零退出**
-（要更新就 `python3 extract.py --write`）。抽取只做一处替换，并且会打印出来：
+`run.sh` 第一步是 `python3 extract.py`：它从生产源码逐字节重抽四个 `.inc`（驱动里三个，
+XNU 的 USB 调试补丁里一个——`ring.inc` 是内核那一兆控制台镜像 `lq_ring/lq_append/lq_copy`），
+**只要漂移就非零退出**（要更新就 `python3 extract.py --write`）。抽取只做一处替换，并且会打印出来：
 
     liuqinPtrOk: (uintptr_t)p >= LIUQIN_KERNEL_TEXT_LO   ->   liuqinSimPtrOk(p)
 
@@ -18,25 +25,26 @@ XNU 补丁里两个——`ring.inc` 是内核那一兆控制台镜像 `lq_ring/l
 
 | 文件 | 来源 |
 |---|---|
-| `helper.inc` | 驱动的 `liuqin_meta_shim` / `liuqinChainDepth` / `liuqin_block_super_fix` / `liuqinInstallMetaclassFix` / `liuqinBaseClassCheck` / `liuqin_base_class_probe`（连续一段，原样） |
-| `witness.inc` | 驱动的 `liuqinMetaclassWitness()`（原样） |
-| `gate.inc` | `NativeUfs::startRoot` 的 H16-F 序言：装钩子 → 见证字段 → 读 boot-arg → 走策略（原样） |
+| `helper.inc` | 驱动的 `liuqin_meta_shim` / `liuqinChainDepth` / `liuqinBaseClassCheck` / `liuqin_base_class_probe`（连续一段，原样） |
+| `witness.inc` | 驱动的 `liuqinMetaclassWitness()`：走链、坏则打印、`mc-ok`/`mc-bad`（原样） |
+| `gate.inc` | `NativeUfs::startRoot` 的序言：先见证走链 → 读 boot-arg → 走策略（原样） |
 | `ring.inc` | XNU 补丁 `zzz-liuqin-usb-debug.patch` 里的 `lq_ring` / `lq_append` / `lq_copy`（原样） |
-| `report.inc` | XNU 补丁 `zzzzzzzzzz-…-stalled-diagnostics.patch` 里的 `liuqin_metaclass_poison_report` + `liuqin_fingerprint()`（原样） |
-| `sim.cpp` | IOKit 桩件 + `postModLoad` 第一轮扫描的**逐分支镜像**（不是抽取：那段代码嵌在大函数里），外加一面真镜像：`liuqin_debug_puts` 按生产顺序先入环再上屏，`liuqin_debug_copy` 在"锁被占住"时返回 0 |
+| `sim.cpp` | IOKit 桩件 + 合成镜像 + 面板（只保留最后 512 B）+ 场景 A–G |
 
 | 场景 | 建模对象 | 期望 |
 |---|---|---|
-| A 重名理论（已死，留作证据） | 批次里出现第二个 `IOBlockStorageDevice` 名字 | 扫描进入重名分支（`-2`），这正是 v36 gate 想挡的东西 |
-| **B（v39 策略）** | 名字被**家族本身**占用（iOS 17 闭包的常态） | 放行并打 `U:base-ok`；size 不一致时 `U:base-abi` 仍放行；被**另一个对象**占用时 `U:base-alien` 拒绝 |
-| C 闭世界 | 家族没进预链闭包 | `U:base-free` 放行 |
-| D（v37/v38） | 批次干净，但某项 `superClassLink` 是 ASCII 毒值 | D1 裸走链复现 `postModLoad+0x2d4` abort；D2 关闭修复时**只丢那一项**，其余照常登记，`sDeepestClass` 语义不变 |
-| **E（H16-F）** | 同一毒值 + 驱动装了修复钩子 | E1 扫描点名 `M:bad[1] fixed`、`healed=1 dropped=0`、两项都登记、depth=3；E2 `startRoot` 的见证把字段改回家族对象；E3 家族自身链坏时钩子**拒绝交指针**，退回丢弃；E4 只有名字精确等于 `NativeUfsBlock` 才给超类 |
-| **F（H16-G）** | 毒值是文本，所以要搜那面一兆镜像 | F1 生产者被找到，`at/after/total` 与构造时算出的数字逐字节相等，且指纹调用**严格早于**修复；F2 纯可打印 needle 只出现在我们自己那行里 → 判 `self=1`，不判生产者（自我命中）；F3 环绕回、证据被覆盖 → 报 `lost=`，绝不报 `clean`；F4 绕回之后生产者还在 → 偏移取自**真正开始的位置**（`lq_copy` 会把过旧的位置往前钳），旧写法会指向已被覆盖的地址并白烧轮数；F5 锁被占 → 一次拷贝即放弃，报 `gaveup`，不自旋；F6 每次启动最多 2 次指纹，没装钩子的板子输出与 v39 逐行相同；F7 面板只留最后几行 → 证据行由 `witness("pub")` 重放，`pre` 不放 |
+| **A 健康链** | 绑定正确（v42 之后应有的样子） | 走链 depth=3；`U:base-ok`；面板上**一句多余的话都没有**——沉默就是目标状态 |
+| **B gate 判决表** | B1 size 倾斜 / B2 别的对象占名 / B3 闭包里没有家族 / B4 `liuqin-native-ufs-skip-gate=1` | `base-abi` 仍放行；`base-alien` 拒绝并把原因打在面板上；`base-free` 放行；带 skip 参数时 alien 也放行 |
+| **C 哨兵只报告** | 把 `superClassLink` 换成 ASCII 毒值（= v42 那种错绑定的现场形态） | `U:mc-bad` + 那行带 `bad=`/`link=`/`depth=` 的报告；**字段一个字节都没被改**（不修）；绑定修好后同一个见证必须沉默 |
+| D 走链的安全性 | D1 三元环 / D2 一个外来（未对齐、不在像里）地址 | D1 撞到 `LIUQIN_CHAIN_MAX` 就报 `depth=-65`，**不自旋**；D2 返回 `depth=0` 且 `bad=` 指向那个地址，**一次都没解引用**（主机上解引用就是 SIGSEGV，所以断言的是返回值形状） |
+| E 控制台镜像 | E1 绕回 / E2 可读窗口 / E3 `log_lock` 被占 | E1 最老的字节读不到，且偏移必须取自 `pos-got`（AGENTS 规矩③）；E2 顺序与 `total` 精确；E3 镜像丢字并计数、面板照样画、一次拷贝就退，**绝不自旋** |
+| **F 面板会滚** | 只在 `pre` 打印的结论 | 刷屏之后照片上就没了（`!panelHas`），镜像里还在（`mirrorHas`）；`pub` 那一枪是最后一张票，断言它带着同一行 |
+| G 完整序言 | 健康状态下的 `startRoot` 入口 | `mc-ok` → `base-ok`，面板上留下那行 ABI 证据（`live size 248, compiled size 248`） |
 
-桩件里 `IOBlockStorageDevice` 的 `sizeof` 是 248，与面板 `sz=248` 对齐，因此 B 的
-`base-ok`/`base-abi` 两条分支是真的在比同一对数字。
+桩件里 `IOBlockStorageDevice` 的 `sizeof` 是 248，与实机符号表一致，因此 B1 的
+`base-ok`/`base-abi` 两条分支是真的在比同一对数字（v42 实机那行是 `144/144`）。
 
-F 场景断言的是**镜像里有什么**（`mirrorHas` 走的也是生产的 `lq_copy`），以及**面板上还留
-着什么**（`simPanel` 只保留最后 512 字节，模拟 panic screen 的重绘）；一个只在 stdout 上
-正确的实现过不了这一关。
+E/F 两组断言的是**镜像里有什么**（`mirrorHas` 走的也是生产的 `lq_copy`）以及**面板上还留着
+什么**（`simPanel` 只保留最后 512 字节，模拟 panic screen 的重绘）；一个只在 stdout 上正确的
+实现过不了这一关。AGENTS 里"搜镜像三条规矩"中的第③条（偏移取 `pos-got`）现在只有这里守着——
+搜索本身已经随 H16 一起删掉了，但 `lq_copy` 的钳位行为还在生产代码里。

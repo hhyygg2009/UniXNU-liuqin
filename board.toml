@@ -158,7 +158,7 @@ BUILDID_STRING = "liuqin-research"
 volume = "LIQUNESP"
 size_mib = 64                          # 只有 kernel + adt + toml，sheng 的 192 是给 Data seed 留的
 loader = "firmware"
-timeout = 15                        # 菜单停留 5 分钟，bring-up 时方便观察/拍照（sheng 默认 3 秒）
+timeout = 3                           # v43: bring-up 拍照靠看门狗自动 boot，不需要人守菜单（15 s 是 H16 期间留的）
 title = "liuqin first boot: source 4K XNU to console"
 ui_scale = 2                         # 取消自动 scale（Height/540=5 → 只有 45 列，48 字符的行会被切在屏幕右边）；4 → 56 列 x 45 行
 dram_size = "0x80000000"             # TODO(liuqin): 从 liuqin 的 SMEM RAM 表读
@@ -235,6 +235,18 @@ kernel_args = [
   # "rootvp not authenticated after mounting" right after a SUCCESSFUL root mount
   # (z-z-z-liuqin-development-root-policy; read-only root only; mondrian-proven design).
   "liuqin_allow_unsealed_root=1",
+  # H17 (2026-11-19): v42 mounts the root and then dies at the exec of init --
+  # "Taking non-sleepable RW lock with preemption enabled @lock_rw.c:1400" inside the
+  # trust-cache query that AMFI runs on launchd's cdhash. The lock is only made sleepable
+  # inside trust_cache_runtime_init(), which this configuration compiles out (see
+  # patches/xnu/zzzz-liuqin-trust-cache-lock-init.patch), so the patch answers the panic.
+  # These two args answer the *decision*: the static trust caches are not in the payload yet
+  # (out/liuqin/payload/payload.json trust_cache_sha256 = null), so no cdhash can come back
+  # trusted. Both are bring-up switches; retire them with the TC line -- flip
+  # CONFIG_XNU_TRUST_CACHE_RUNTIME=y in the active defconfig and ship the two IPSW trust
+  # caches that board.toml already fetches.
+  "amfi_get_out_of_my_way=1",
+  "cs_enforcement_disable=1",
   "boot-ui-focus=PreBoard",
   "boot-ui-focus2=SpringBoard",
   "boot-ui-focus3=backboardd",

@@ -1,7 +1,6 @@
   const char *why = "";
-  // Normally installed by the metaclass constructor (H16-F); idempotent, and it keeps the
-  // XNU-side repair reachable if this run skipped that path.
-  liuqinInstallMetaclassFix ();
+  // Normally the first thing startRoot does is look at its own metaclass chain: everything
+  // below allocates, and an allocation walks that field through isMemberOf().
   liuqinMetaclassWitness ("pre");
   // liuqin (H16-F): v36 refused root publication whenever the name "IOBlockStorageDevice"
   // was taken. The family is prelinked in every iOS 17 closure, so that was always true,

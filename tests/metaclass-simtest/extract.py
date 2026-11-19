@@ -37,16 +37,15 @@ def transform(text, label):
     return text
 
 USB = ROOT / 'patches/xnu/zzz-liuqin-usb-debug.patch'
-H16 = ROOT / 'patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch'
 
 
 def added_span(text, begin, end, label, source):
     """A production span that ships inside a patch: find both markers among the added lines,
     take everything between them, and strip the leading '+'.
 
-    Used for code that lives in libkern rather than in the driver, so the patch text *is* the
-    production source and the sim runs the code the kernel runs: the one-megabyte console mirror
-    (lq_ring / lq_append / lq_copy) and the H16-G fingerprint entry point.
+    Used for code that lives in libkern/bsd rather than in the driver, so the patch text *is*
+    the production source and the sim runs the code the kernel runs: the one-megabyte console
+    mirror (lq_ring / lq_append / lq_copy).
     """
     lines = text.splitlines(keepends=True)
     for marker, which in ((begin, 'begin'), (end, 'end')):
@@ -63,26 +62,22 @@ def added_span(text, begin, end, label, source):
 src = DRIVER.read_text()
 
 pieces = {
-    # shim + chain + repair hook + base-class policy: one contiguous region
+    # shim + chain walk + base-class policy: one contiguous region
     'helper.inc': span(src, 'struct liuqin_meta_shim',
                        'extern "C" int liuqin_base_class_probe (void) { return liuqinBaseClassCheck () ? 1 : 0; }'),
-    # startRoot's H16-F prologue: install the hook, witness the field, then the policy
-    'gate.inc': span(src, '  const char *why = "";\n  // Normally installed by the metaclass constructor',
+    # startRoot's prologue: witness the chain, then the policy
+    'gate.inc': span(src, '  const char *why = "";\n  // Normally the first thing startRoot does',
                      '    return false;\n  }\n'),
-    # the witness itself, which is also the repair path used at U59
+    # the witness itself: the chain sentinel, printed at U59 and at publication
     'witness.inc': span(src, 'static void liuqinMetaclassWitness (const char *phase)',
                         '  liuqin_milestone ("U", depth < 0 ? "mc-bad" : "mc-ok");\n}\n'),
-    # the mirror the fingerprint searches: production lq_ring / lq_append / lq_copy
+    # the console mirror the milestone stream is printed into: production
+    # lq_ring / lq_append / lq_copy
     'ring.inc': added_span(USB.read_text(), '#ifndef LQ_RING_SIZE', '\t*pos += n;',
                            'ring.inc', USB.name),
-    # the libkern half of H16-G: the report hook and its bounded call site
-    'report.inc': added_span(H16.read_text(),
-                             'extern "C" void (*liuqin_metaclass_poison_report)',
-                             'liuqin_metaclass_poison_report(tag, me,',
-                             'report.inc', H16.name),
 }
 
-SOURCES = {'ring.inc': USB.name, 'report.inc': H16.name}
+SOURCES = {'ring.inc': USB.name}
 write = '--write' in sys.argv[1:]
 stale = []
 for name, body in pieces.items():
