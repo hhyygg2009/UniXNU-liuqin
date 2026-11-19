@@ -5,9 +5,11 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
 状态：**内核、UEFI 固件、payload、boot.img 都能在 Linux 主机上构建**（2026-11-13 验证）；
 实机 `fastboot boot` 已反复验证（v33→v38，纯内存运行，不写分区）。
 **2026-11-17（v38）：内核第一次走完 IOKit 引导进入 BSD，一路到达挂载决策**，阻塞点被钉死到
-具体对象、具体字段（见「进度」一节）。**2026-11-18（v39）：修好那个字段的代码已经构建完成**；**同日（v40）：回答"谁写的"的代码
-也已经构建完成**（`releases/boot-liuqin-v40-fingerprint.img`，69,525,504 B）。这两轮都
-**没有上机**（平板不在手边），结论全部来自主机侧：生产构建、进像反汇编审计、仿真回归。
+具体对象、具体字段（见「进度」一节）。**2026-11-19（v42）：H16 结案并第一次挂上根卷**——真相是 UFS 绑定脚本把原厂 21H461
+kernelcache 的 VA 当成我们镜像的 VA 用（每个 kext 段都低 16 MiB），所谓"涂写"从来不存在；
+**同日（v43）：剪掉整套 H16 诊断，修掉新的墙 H17**（trust-cache 那把非睡眠 RW 锁在
+`exec init` 的签名查询里必炸，`releases/boot-liuqin-v43-trust-cache-lock.img`，69,525,504 B）。
+v43 **未上机**，结论全部来自主机侧：生产构建、62 项进像反汇编审计、A–G 仿真回归。
 板级关键数值已经从 stock 固件里核实完了，board.toml 里每个 TODO 都有明确的取值方法和当前状态。
 
     board.toml                 板级描述（userdata LBA、splash、FD 窗口已填实测值）
@@ -18,15 +20,16 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
     docs/vendor-inputs.md      stock UEFI 抽出的 154 个厂商输入 + uefiplat.cfg 硬数据
     docs/porting-plan.md       四阶段计划、通过标准、当前阻塞、立刻可做的事
     docs/liuqin-usb-debug.md   内核 USB CDC-ACM 调试口（LIQDBG001）：开关、四道自检门、移植对照表
-    docs/boot-rounds-v35-v40.md  逐轮判读：改了什么、照片看到什么、哪些假设被证伪
-    scripts/audit-h16f-image.py  一条命令证明 H16-F/G 的代码真在 kernel.macho 里（42 项检查）
+    docs/boot-rounds-v35-v43.md  逐轮判读：改了什么、照片看到什么、哪些假设被证伪
+    scripts/audit-h16f-image.py  一条命令证明"该在的在、该没的没"（62 项，按符号边界取反汇编）
     drivers/ShengUfs/          SM8475 UFS/SMMU/根存储驱动 fork（分支 liuqin-sm8475），
                                tests/check_legacy_descriptors.py 是上游 descriptor oracle
     patches/xnu/               基础补丁 + zzz-liuqin-usb-debug*.patch（USB 调试口、bsd_init 里程碑）
-                               + zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch（H16 系列，见「进度」）
+                               + zzzz-liuqin-trust-cache-lock-init.patch（H17：trust-cache 锁初始化）
+                               （H16 那个诊断补丁已在 v43 删除，结案过程见 docs/boot-rounds）
     scripts/                   板级构建/打包/补丁脚本；token-stats.py 复现「AI 用量统计」
     tests/liuqin_usb_host_test.c  调试口逻辑的主机侧测试（gcc，不需要内核）
-    tests/metaclass-simtest/   postModLoad 扫描/修复/指纹的主机侧仿真（./run.sh，场景 A–F）
+    tests/metaclass-simtest/   元类哨兵与 base-class gate 的主机侧仿真（./run.sh，场景 A–G）
     tools/capture-liuqin-debug.ps1  主机侧抓取脚本（按 VID/PID+序列号定位 COM，置 DTR）
 
 配套（同级目录）
@@ -64,7 +67,7 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
 （补丁互相重叠，第二遍既不能 apply 也不能 reverse-check）；删掉 `.cache/xnu-work`
 或改动任一补丁才会重新套用。
 
-## 进度（截至 2026-11-18，v40）
+## 进度（截至 2026-11-19，v43）
 
 打通的：全链路 Linux 构建与实机 `fastboot boot`（不写分区）；UFS 控制器/SMMU/根窗口读取；
 userdata 挂载与非密封根策略（v34b/c/d）；panic 上屏（v35，`--panic-only`）；
@@ -81,6 +84,24 @@ H16 系列（把 v35 起卡在 `K49:PE_init_iokit` 的 data abort 追到底）�
 | v38 | 逐槽命名 + 祖先链校验 + **跳过坏槽而非整批拒绝** | **崩溃消失**，启动到达挂载决策 |
 | v39 | **修那个字段**：libkern 侧钩子 + 驱动交出链接期超类地址；策略不再因"名字被占"而拒绝；`M:mc pre/pub` 见证 | 未上机（主机侧 12 项审计 + A–E 仿真全通过） |
 | v40 | **给毒值按指纹**：第二个钩子在修复之前把毒值渲染成字符，并回搜 1 MiB 控制台镜像，报 `hits/self/lost/at/after` + 命中处上下文；证据行由 `witness("pub")` 重放到面板 | **已上机（IMG_7119–7123）**：修复在现场生效、无崩溃，指纹跑出来了；毒值被符号表点名，而挡住根的换成了 `base-alien` |
+| v41 | 把 `base-alien` 变成**算术**：`M:alien held/want/delta/slide/cmp/off`（照片上逐位读两个 16 位地址是这套诊断翻过的车） | **已上机**：`delta=−0x1000000`、`slide=0x0`、`cmp=1 off=0x0`，而 `want=`（我们链接期引用的"家族对象"）自己的四个字段全是 ASCII 与荒谬数字 ⇒ **钥匙**：那个对象本身是垃圾 |
+| v42 | **只改绑定脚本**：按 `kernel.json` 的 `coalesced_segments` 逐段映射原厂 VA；落在原厂内核本体段里的对象交回链接期按符号名解析 | **已上机（IMG_7140–7153）：H16 结案**。`M:bad/M:fp/M:alien` 全消失，`live size 144, compiled size 144` + `U60:mc-ok`/`U61:base-ok`，**第一次越过 `Failed to mount root device`** 一路到 `B19:at_mountroot`。新的墙：`Taking non-sleepable RW lock with preemption enabled @lock_rw.c:1400` |
+| v43 | **H17**：`startup.c` 被编译掉的那块里补 `lck_rw_init(trust_cache_rt_lock, …)` + `kern_trustcache.c` 判空 `amfi`；启动参数 `amfi_get_out_of_my_way=1` + `cs_enforcement_disable=1`；**剪掉 H16 诊断**（删扫描补丁、驱动 −369 行、菜单 timeout 15→3） | **未上机**。主机侧 62 项审计 + A–G 仿真 + 14/14 descriptor + USB 主机测试全过；镜像 `releases/boot-liuqin-v43-trust-cache-lock.img` |
+
+v42 之后的战线已经**不在存储**：根卷挂上了。v43 对着 H17 修，判读表写在
+`releases/v43-NOTES.md`（最想要的那一行是面板上的 `K5x:trust_cache_lock_init`）。
+
+### H17 是什么（一句话版）
+
+`lock_rw.c:1400` 的 panic 栈是 `bsdinit_task → load_init_program → __mac_execve → … →
+mac_vnode_check_signature → query_trust_cache → lck_rw_lock_shared`：exec `/sbin/launchd`
+时 AMFI 问"这个 cdhash 可信吗"。而那把 `trust_cache_rt_lock` 只会被
+`trust_cache_runtime_init()` 变成可睡眠锁——活跃配置里 `CONFIG_XNU_TRUST_CACHE_RUNTIME=n`
+（`out/liuqin/.config` 实际等于 `configs/liuqin_boot_defconfig`，而 `board.toml` 声明的是
+`liuqin_defconfig`，这两者不一致是个独立问题），整块被编译掉：`llvm-nm` 里
+`_trust_cache_runtime_init` 存在却**没有任何 `bl` 指向它**，`"trust_cache_init"` 字符串也不在像里。
+锁留在 `__common` 里零初始化 ⇒ `lck_rw_can_sleep=false` ⇒ 每次启动必炸。
+v43 的补丁就是在那条 `#else` 分支上把锁初始化好，并给空 `amfi` 一个 `KERN_NOT_FOUND`。
 
 v40 实机点名（IMG_7119–7123，2026-11-18 20:40）：
 
@@ -99,7 +120,7 @@ Failed to mount root device @IOKitBSDInit.cpp:989
 `kprintf/printf` 不进镜像（补丁里就有 `%08x` 的打印）；③ 持有 `IOBlockStorageDevice` 名字的对象在
 `0xfffffff006add1d0`，与编译期那个差**正好 16 MiB、低 24 位相同**，且不在内核镜像任何段内（zone 对象）
 ——要么家族类被复制进 zone，要么一个 −16 MiB 的 slide 被单边应用。v41 一次照片分开它们。
-逐行判读见 [docs/boot-rounds-v35-v40.md](docs/boot-rounds-v35-v40.md) 的「v40 实机判读」。
+逐行判读见 [docs/boot-rounds-v35-v43.md](docs/boot-rounds-v35-v43.md) 的「v40 实机判读」。
 
 v38 实机点名（IMG_7059–7063）：
 
@@ -121,7 +142,8 @@ M:stalled scan BAD h=0xfffffff568caffe0 cnt=1 c0=0xac c1=0x6
    （v39 起 `I60:base-dup` 这条里程碑与 `liuqinBaseClassFree()` 一起删除：照片上还能看到它，
    说明刷的是旧镜像。）
 
-剩下的两个阻塞点：① 谁把 8 字节控制台文本写进 `NativeUfsBlock::gMetaClass + 0x10`（`superClassLink`）——
+（**下面两段写于 v38**，保留是为了不让"谁涂写的"这个错误问题复活；H16 的真实答案是 v42 那节：
+绑定指向了错误的地址空间。）剩下的两个阻塞点：① 谁把 8 字节控制台文本写进 `NativeUfsBlock::gMetaClass + 0x10`（`superClassLink`）——
 驱动自己的 `native_ufs_*` 静态量已排除，它们与该对象在 `__common` 里首尾精确相接且全是 uint32，
 而 libkern 里唯一写该字段的语句是 `OSMetaClass` 构造函数（`superClassLink = inSuperClass;`）；
 ② 根挂载要求我们的类真正登记成功（v38 把它从批次里丢了，`isMemberOf()` 走同一字段仍会炸；
@@ -170,13 +192,14 @@ M:stalled scan BAD h=0xfffffff568caffe0 cnt=1 c0=0xac c1=0x6
 `fastboot boot`（纯内存，不写分区）。
 
 诊断手段：面板里程碑控制台（`K`/`B`/`U`/`I`/`M:` 前缀）+ 1 MiB 环形缓冲 + USB 调试口。
-逐轮改动、照片判读与被证伪的假设都固化在 **[`docs/boot-rounds-v35-v40.md`](docs/boot-rounds-v35-v40.md)**；
-主机侧回归 `tests/metaclass-simtest/run.sh`（场景 A/B/C/D + E1–E4 + **v40 新增的 F1–F7：生产者命中
-且 `at/after/total` 逐字节正确、无自我命中、绕回报 `lost`、绕回后偏移仍精确、锁被占即退、每次启动
-2 次封顶、无钩子板子与 v39 逐行相同、面板滚动后证据仍在**；五个 `.inc` 由 `extract.py` 从驱动源码与
-两个 XNU 补丁逐字节抽取，漂移即失败）；进像证明一条命令 `python3 scripts/audit-h16f-image.py`（42 项，
-每个函数按符号边界取反汇编）；上游 descriptor oracle
-`drivers/ShengUfs/tests/check_legacy_descriptors.py`（14/14）。
+逐轮改动、照片判读与被证伪的假设都固化在 **[`docs/boot-rounds-v35-v43.md`](docs/boot-rounds-v35-v43.md)**；
+主机侧回归 `tests/metaclass-simtest/run.sh`（v43 起场景是 A–G：健康链只打 `mc-ok`、gate 的四种判决
+＋ skip-gate 参数、哨兵**只报告不修**、走链遇到环与外来地址时既不自旋也不解引用、镜像的环绕/钳位/
+锁被占三种形态、面板滚掉之后 `pub` 那一枪还在、健康序言的完整输出；四个 `.inc` 由 `extract.py`
+从驱动源码与 USB 调试补丁逐字节抽取，漂移即失败）；进像证明一条命令
+`python3 scripts/audit-h16f-image.py`（**62 项**，该在的在 / 该没的没：绑定落在自己的段里、
+`lck_rw_init` 出现在被编译掉的那条分支上、`amfi` 判空早于取锁、扫描与指纹的代码和文本全部不在像里）；
+上游 descriptor oracle `drivers/ShengUfs/tests/check_legacy_descriptors.py`（14/14）。
 镜像本身放在构建机的 `releases/`（不入库，`fastboot boot` 用）。
 
 ## 收录与发布

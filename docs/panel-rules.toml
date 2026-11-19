@@ -169,3 +169,101 @@ pattern = 'M:alien delta='
 round = "v41"
 name = "U61:base-alien"
 pattern = 'base-alien'
+
+# ---------------------------------------------------------------------------
+# v42（绑定按段映射）：H16 的结案判决，以及新墙 H17
+# ---------------------------------------------------------------------------
+[[rule]]
+round = "v42"
+id = "h16-closed"
+verdict = "H16 结案：幻影地址消失，gate 第一次放行（live size == compiled size + base-ok）"
+next = "存储这条线到此为止；看 at_mountroot 之后走到哪"
+require = ['base-ok', 'live size ([0-9]+), compiled size']
+forbid = ['M:fp', 'M:alien', 'M:bad\[']
+
+[[rule]]
+round = "v42"
+id = "root-mounted"
+verdict = "根卷第一次挂上：越过 Failed to mount root device，出现 root-bringup/layout/manifest/plan 与 at_mountroot"
+next = "下一件事在 exec init（AMFI/trust cache），不在 IOKit"
+require = ['root-bringup-ok', 'root-prepared', 'at_mountroot']
+forbid = ['Failed to mount root device']
+
+[[rule]]
+round = "v42"
+id = "method-slot-relocation-wrong"
+verdict = "反证条件：崩在 0xfffffff00496… 段内 —— kext 侧方法槽不该位移"
+next = "回滚到只位移四条数据符号（emitted），方法槽保留原厂值"
+require = ['pc 0xfffffff00496']
+
+[[signal]]
+round = "v42"
+name = "U61:base-ok"
+pattern = 'base-ok'
+[[signal]]
+round = "v42"
+name = "ABI 证据行（live/compiled size）"
+pattern = 'live size [0-9]+, compiled size [0-9]+'
+[[signal]]
+round = "v42"
+name = "非睡眠锁 panic（H17 的墙）"
+pattern = 'Taking non-sleepable RW lock with preemption enabled'
+
+# ---------------------------------------------------------------------------
+# v43（H17 修复 + 剪诊断）：trust_cache_lock_init 是这一轮唯一的新证据
+# ---------------------------------------------------------------------------
+[[rule]]
+round = "v43"
+id = "h17-patch-ran"
+verdict = "补丁那条 #else 分支跑了：面板出现 trust_cache_lock_init"
+next = "看 exec init 之后：没有 lock_rw.c:1400 就说明这把锁就是元凶"
+require = ['trust_cache_lock_init']
+
+[[rule]]
+round = "v43"
+id = "h17-closed"
+verdict = "H17 结案：init 的 exec 过了，at_mountroot 之后出现新的用户态里程碑"
+next = "战线移到用户态（launchd/签名判决）；撤掉 amfi_get_out_of_my_way 之前先把 TC 打进 payload"
+require = ['at_mountroot', 'trust_cache_lock_init']
+forbid = ['lock_rw\.c:1400']
+
+[[rule]]
+round = "v43"
+id = "another-nonsleepable-lock"
+verdict = "反证：已有 trust_cache_lock_init 却仍然 lock_rw.c:1400 —— 炸的是另一把非睡眠锁"
+next = "把 21 帧重新符号化（llvm-nm -m + 二分），按新地址定位那把锁的持有者"
+require = ['trust_cache_lock_init', 'lock_rw\.c:1400']
+
+[[rule]]
+round = "v43"
+id = "patch-not-shipped"
+verdict = "面板里没有 trust_cache_lock_init，K 编号也没位移：补丁没进像"
+next = "先跑 scripts/audit-h16f-image.py 的 K 段（lck_rw_init 的 adrp/add/bl），再决定重打"
+forbid = ['trust_cache_lock_init']
+
+[[rule]]
+round = "v43"
+id = "img4-amfi-wall"
+verdict = "撞到 img4if/amfi 未注册那一类：TC 进 payload 从下一步变成硬前置"
+next = "CONFIG_XNU_TRUST_CACHE_RUNTIME=y + 把两份 IPSW trust cache 打进 payload（trust_cache_sha256 现在是 null）"
+require = ['AppleImage4|img4|unable to query trust caches']
+
+[[rule]]
+round = "v43"
+id = "diagnostics-removed"
+verdict = "剪诊断生效：整页没有 M:stalled/M:fp/M:alien，里程碑不再被顶出屏幕"
+next = "这是 v43 的期望状态，不需要动作（若还有 M: 行 = 刷的是旧镜像）"
+forbid = ['M:stalled', 'M:fp ', 'M:alien', 'M:scan done']
+
+[[signal]]
+round = "v43"
+name = "K5x:trust_cache_lock_init"
+pattern = 'trust_cache_lock_init'
+[[signal]]
+round = "v43"
+name = "根挂上（at_mountroot）"
+pattern = 'at_mountroot'
+[[signal]]
+round = "v43"
+name = "H17 的旧 panic 行"
+pattern = 'lock_rw\.c:1400'

@@ -1,10 +1,12 @@
-# 逐轮判读：v35 → v40（2026-11-16 → 2026-11-18）
+# 逐轮判读：v35 → v43（2026-11-16 → 2026-11-19）
 
 K49:PE_init_iokit 处的 `Kernel data abort` 从 v35 第一次可读，到 v38 被彻底消掉并点名。
 这一页记录每一轮改了什么、照片看到什么、以及被证伪的假设——避免以后走回头路。
 v39 与 v40 都是"平板不在手边"的轮次：改动、主机侧证据和判读表写全，照片栏留空。
 v40 把"谁写的这 8 个字节"变成一条可以打印的答案，而它的全部依据来自仿真——
 那面一兆控制台镜像在主机上是一比一复刻的，所以搜得到搜不到、偏移对不对，不用上机就能判。
+v41/v42 把这条线追到底并结案（**绑定用错了地址空间**），v42 实机第一次挂上根卷；
+v43 剪掉整套 H16 诊断、修掉新墙 H17（trust cache 的非睡眠锁）。
 
 诊断通道：面板里程碑控制台（前缀 `K` 内核 / `B` BSD / `U` 驱动 / `I` 挂载 / `M:` 元类扫描）
 + 1 MiB 环形缓冲；v35 起 panic 直接上屏（`patch-xnu-entry-probe.py --panic-screen --panic-only`）。
@@ -22,6 +24,10 @@ v40 把"谁写的这 8 个字节"变成一条可以打印的答案，而它的�
 | v38 chain-dump | `49247f07` | 逐槽命名 + 祖先链校验 + **跳过坏槽而非整批拒绝**；结论行放最后 | **崩溃消失**，第一次走完 IOKit 引导到挂载决策 |
 | v39 heal | `b261c1b6` | 扫描撞到坏链时向驱动要链接期超类，验过再写回；策略不再因"名字被占"拒绝；`M:mc pre/pub` 见证 | **未上机**（平板不在手边），主机侧 12 项审计 + A–E 仿真 |
 | v40 fingerprint | `0f6b131d` | 第二个钩子：把毒值按字符打出来，并回搜 1 MiB 控制台镜像；`hits/self/lost/at/after` + 证据行重放 | **未上机**，主机侧 42 项审计 + A–F 仿真 |
+| v40 实机 | 同上 | —（IMG_7119–7123，2026-11-18 20:40） | `M:fp … ring hits=2`；gate 报 `base-alien`，墙从崩溃变成一条可读的拒绝 |
+| v41 alien-arithmetic | `0f6b131d`→`9…` | `M:alien held/want/delta/slide/cmp/off`：把"两个地址差多少"变成可拍的算术 | `held=` 与 `want=` 差 **恰好 −0x1000000**、`slide=0x0`、`want=` 那行自己是垃圾 → **根因浮出**（见 v41 节） |
+| v42 relocated-bindings | `f958d67f` | **只改绑定脚本**：按 `kernel.json` 的 `coalesced_segments` 逐段映射，落在原厂内核本体段里的对象交回链接期解析 | **H16 结案**：`M:bad/M:fp/M:alien` 全部消失、`U61:base-ok`（`live size 144, compiled size 144`）、**第一次越过 `Failed to mount root device`**；新墙 = `lock_rw.c:1400` panic |
+| v43 trust-cache-lock | `e8233d2e` | H17：`startup.c` 的 `#else` 分支初始化 `trust_cache_rt_lock`、`kern_trustcache.c` 判空 `amfi`；启动参数加 `amfi_get_out_of_my_way=1`+`cs_enforcement_disable=1`；**删掉 H16 诊断**（扫描补丁 + 驱动 369 行）；菜单 timeout 15→3 | 未上机。主机侧 62 项审计 + A–G 仿真全过 |
 
 ## v37 判读：脏数组假设被否证
 
@@ -327,3 +333,179 @@ VAs，不像 mondrian 那样重排"是错的假设，它让**每一条**绑定�
 可证伪的预测：v42 之后 `M:bad[170]` 与 `M:alien` 都应消失，出现
 `NativeUfs: base class IOBlockStorageDevice live size …, compiled size …` + `U:base-ok`，
 然后**第一次**看到 APFS 挂载的真实结果。
+
+---
+
+## v42 实机判读（IMG_7140–7153，2026-11-19 00:02 上机）：H16 结案
+
+上机方式：`releases/watch-v42-loop.sh` 在 23:53:09 抓到 serial `19562650`，
+`fastboot boot` → Sending `OKAY 2.300s` / Booting `OKAY 0.287s`，纯内存、没写任何分区。
+
+### 三条可证伪预测全部命中（v42-NOTES 里那是"预测"，这里是结果）
+
+| v42 的预测 | 面板 | 判定 |
+|---|---|---|
+| `M:bad[170]`、`M:fp`、`M:alien` 全部消失 | 一行都没有 | ✓ 幻影地址没了 |
+| 出现 `NativeUfs: base class IOBlockStorageDevice live size …, compiled size …` + `U:base-ok` | `live size 144, compiled size 144` + `U60:mc-ok` → `U61:base-ok` | ✓ gate 第一次放行 |
+| 越过 `Failed to mount root device @IOKitBSDInit.cpp:989` | 越过：`root-bringup-ok → root-layout-ok → root-manifest-ok → root-plan-ok → root-iostart-ok → root-unauth-open → ac-ok → root-prepared → root-media-SystemOS → B17:ofindroot_done → B19:at_mountroot` | ✓ 根窗口读到、计划建起、根卷挂上 |
+| **反证条件**：pc 落在 `0xfffffff00496…`（方法槽不该位移） | 没有发生 | ✓ 按段映射是对的，不需要回滚 |
+
+**H16 到此结案。** 追了五天的"谁涂写了 `superClassLink`"，答案是：**没有人**——是我们把
+原厂 21H461 kernelcache 的 VA 当成我们镜像的 VA 用，读到了自己 `__common` 里邻居静态变量的字节。
+
+### 新墙（H17）：挂上根卷之后，死在 exec init
+
+```
+panic: Taking non-sleepable RW lock with preemption enabled   @lock_rw.c:1400
+frames fffffff00729d414 fffffff00775f028 fffffff004aad120 fffffff004ab3e34
+       fffffff004ab5bf0 fffffff0079bc9f8 fffffff00777cbfc fffffff0077ace40
+       fffffff0077aa1f0 fffffff0077a9860 fffffff0077164f8 fffffff00771a1c4
+       fffffff00771b744 fffffff00771bddc fffffff00771bc00 fffffff0076ef3f8
+       fffffff00773c960 fffffff007276688 fffffff00741b9fc fffffff00741b838
+       fffffff007420664
+pages=0x000000000000babd  free=0x000000000000a9f2
+```
+
+21 帧全部用 `llvm-nm -m` 对着 `out/liuqin/kernel/kernel.macho` 符号化（`_query_trust_cache+0x70`
+这个偏移与面板读数逐位吻合，说明这些内核函数在 v42/v43 之间没位移）：
+
+| # | 地址 | 符号 |
+|---|---|---|
+| 0 | `0xfffffff00729d414` | `_lck_rw_lock_shared+0x58` ← **panic 点** |
+| 1 | `0xfffffff00775f028` | `_query_trust_cache+0x70` |
+| 2–4 | `0xfffffff004aad120 / …ab3e34 / …ab5bf0` | `__PLK_TEXT_EXEC` 内（AMFI 的 kext 帧，本体符号不在主符号表里） |
+| 5 | `0xfffffff00779bc9f8` | MACF `_mac_vnode_check_*+0x48` |
+| 6–7 | `0xfffffff00777cbfc / 0xfffffff0077ace40` | `_ubc_cs_blob_add+0xf0`、`_load_code_signature+0x340` |
+| 8–14 | … | `_parse_machfile → _load_machfile → _exec_mach_imgact → _exec_activate_image → ___mac_execve → _load_init_program_at_path → _load_init_program` |
+| 15 | `0xfffffff0076ef3f8` | **`_bsdinit_task+0x74`** ← 就是 exec init |
+| 16–20 | … | `_bsd_ast → _ast_taken_user → user_take_ast → _thread_bootstrap_return → _Call_continuation` |
+
+也就是说：**根挂上了，内核去 exec `/sbin/launchd`，代码签名漏斗问 AMFI"这个 cdhash 可信吗"，
+AMFI 走 `query_trust_cache`，那把锁炸了。** 每一次启动都会炸在这里。
+
+### 根因（全在主机侧查到）
+
+`lock_rw.c` 里炸的那一句：
+
+```c
+if (lock->lck_rw_can_sleep) { … }
+else if (get_preemption_level() == 0) {
+        panic("Taking non-sleepable RW lock with preemption enabled");
+}
+```
+
+`trust_cache_rt_lock` 是 `decl_lck_rw_data(, trust_cache_rt_lock)`——一个躺在 `__common`
+里零初始化的对象，`lck_rw_can_sleep = false`。全镜像唯一把它变成可睡眠锁的地方是
+`lck_rw_init(&trust_cache_rt_lock, &trust_cache_lck_grp, 0)`，而它在
+`trust_cache_runtime_init()` 里；那个函数只在
+
+```c
+#if !defined(BCM2837) || (defined(XNU_NATIVE_TRUST_CACHE) && XNU_NATIVE_TRUST_CACHE)
+```
+
+这一块里被调用。我们的基线**就是**按 BCM2837 编的，而 `XNU_NATIVE_TRUST_CACHE` 没开
+⇒ 整块被编译掉。主机侧的三条独立证据：
+
+1. `llvm-nm`：`_trust_cache_runtime_init` 在镜像里**存在**（`0xfffffff00775e858`），
+   但全镜像**没有任何一条 `bl` 指向它**；
+2. `grep -c trust_cache_init kernel.macho` = **0**：连 `"trust_cache_init"` 这个 bootstrap
+   字符串都不在像里，所以面板上永远不可能出现它（v42 那一页里也确实没有这一行）；
+3. 配置来源：`out/liuqin/.config` 与 `configs/liuqin_boot_defconfig` **逐字节相同**，
+   里面 `CONFIG_XNU_TRUST_CACHE_RUNTIME=n`。而 `board.toml` 写的是
+   `defconfig = "liuqin_defconfig"`（那一版是 `=y`）——**活跃配置和板级声明不一致**，
+   这是本轮顺手挖出来的一个真问题，单独立项处理（见 v43 节的"下一件事"）。
+
+顺带：`out/liuqin/payload/payload.json` 的 `trust_cache_sha256` 是 **null**——board.toml 里
+`[ipsw]` 明明抓了 `StaticTrustCache` 与 `Cryptex1,SystemTrustCache`，但没打进 payload。
+所以就算锁修好，静态 trust cache 也是空的，没有任何 cdhash 会被判可信。
+
+### v43 怎么修（两条腿，各答一个问题）
+
+- **答 panic**：新补丁 `patches/xnu/zzzz-liuqin-trust-cache-lock-init.patch`
+  在 `startup.c` 的 `#else` 分支里补上 `lck_rw_init(&trust_cache_rt_lock, &trust_cache_lck_grp, 0)`，
+  并 `kernel_bootstrap_log("trust_cache_lock_init")`（面板上那一行就是"这个分支跑了"的证明）；
+  `kern_trustcache.c` 里给 `amfi == NULL` 一个 `KERN_NOT_FOUND` 的回答——"空 trust cache"本来
+  就该是这个语义，解引用空接口不是。
+- **答判决**：启动参数加 `amfi_get_out_of_my_way=1` + `cs_enforcement_disable=1`。这是
+  bring-up 开关，和 TC 那条线一起撤（`CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + 把两份 IPSW trust
+  cache 打进 payload）。参数总长 **967 B < 1000 B** ✓。
+
+---
+
+## v43（H17 修复 + 剪掉 H16 诊断，2026-11-19 构建；**未上机**）
+
+用户这一轮的要求是："diag 没用的话，缩短时间或者不要了"。H16 已经结案，那一整套
+"为了回答'谁写的'"而生的代码就变成纯成本：每次启动都跑、每轮扫描都往面板上刷几十行，
+把真正的里程碑顶出屏幕（v37 丢 `M:stalled post` 就是这么丢的）。
+
+### 剪掉什么、留下什么
+
+| | 内容 | 原因 |
+|---|---|---|
+| 删 | `patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch`（整个 H16-E/F/G 扫描） | `M:stalled` / `M:scan done` / `M:bad[` / `M:dirty[` 的源头；扫描要找的那个"涂写者"不存在 |
+| 删 | 驱动里 `liuqinEightText` / `liuqinRingFind` / `liuqinHasOwnFieldBefore` / `liuqinMetaclassPoisonReport` / `liuqin_block_super_fix` / `liuqinInstallMetaclassFix` / `liuqinAlienReport`（NativeUfs.cpp **−369 / +25** 行） | 指纹、修复钩子、base-alien 算术报告，全都只为诊断服务 |
+| 改 | `OSDefineMetaClassAndStructorsWithInit (NativeUfsBlock, …)` → 普通 `OSDefineMetaClassAndStructors` | `WithInit` 存在的唯一理由是在元类构造函数里装钩子 |
+| **留** | `liuqinChainDepth` + `liuqinMetaclassWitness`（只报告、不修、不搜）+ `liuqinBaseClassCheck` gate | **绊线**：`superClassLink` 全 XNU 只有 OSMetaClass 构造函数会写；绑定哪天再指错，它是第一个开口的地方，而且比 `isMemberOf()` fault 更早 |
+| 留 | 1 MiB 控制台镜像本身（`ring.inc` 那套 `lq_ring/lq_append/lq_copy`） | 它是 USB 调试口和所有 `M:`/`U:` 行的底座，不是诊断脚手架 |
+| 改 | `[payload] timeout 15 → 3` | 拍照靠看门狗自动 boot，不需要人守菜单 |
+
+### 主机侧证据（七项，全都不需要平板）
+
+| # | 命令 | 结果 |
+|---|---|---|
+| 1 | `./unixnu build kernel` | `EXIT=0`；补丁序列因 stamp 变化（`d5fb9560…`）从 pristine 重放整个序列成功 |
+| 2 | `build/sheng-ufs/compile.log` | **0 字节**（驱动零警告） |
+| 3 | `python3 scripts/audit-h16f-image.py` | **IMAGE AUDIT PASS 62 项** |
+| 4 | `grep -c` | `trust_cache_lock_init` 1、`trust_cache_init` 0、`M:fp`/`M:alien`/`M:stalled`/`M:bad[` 全 0、`chain broken` 1、`base class … live size` 1 |
+| 5 | `tests/metaclass-simtest/run.sh` | `ALL SIM ASSERTIONS PASS`（场景重写成 A–G） |
+| 6 | `drivers/ShengUfs/tests/check_legacy_descriptors.py` | `PASS 14` |
+| 7 | `tests/run-host-test.sh` | `all liuqin usb debug host checks passed` |
+
+产物：内核 `e8233d2e047e…`、payload 重打（启动参数变了）、`boot.img` **69,525,504 B** ✓、
+`releases/boot-liuqin-v43-trust-cache-lock.img` sha256 `a358b648bbca…`。
+
+### audit 脚本被改写成本轮的形状
+
+`scripts/audit-h16f-image.py` 原来只证明"H16-F/G/H 进了像"。清理轮次的风险不是"新代码没进去"，
+而是"**旧代码还在里面**"，所以它现在四段并列：该在的在（`S+`/`T+`/`K`/`Q`/`C`/`G`/`B`）、
+该没的没（`S-`/`T-`/`P`）。本轮新增、以后长期有用的三条：
+
+- **`K` 段看"分支"**：`kernel_bootstrap_thread` 里必须出现 `lck_rw_init(_trust_cache_rt_lock,
+  _trust_cache_lck_grp, 0)`，而且**不得**出现 `bl _trust_cache_runtime_init` /
+  `bl _load_static_trust_cache`——两条合起来才证明编译的是 `#else`，也就是我们的补丁真的生效；
+- **`B` 段守 v42 的根因**：家族元类/vtable 的绑定地址必须落在我们自己的
+  `__PRELINK_DATA` / `__PLK_DATA_CONST` 里，且没有一条指回 `__common`。以后 fileset 布局再动，
+  这一条会先响；
+- **`G` 段读 GOT**：gate 的比较对象不是 `adrp/add` 立即数，而是 `__got` 里的一格
+  （`ldr x8, #0x36c78` → `0xfffffff007a0c008`）。脚本因此**把那 8 个字节从镜像里读出来**
+  再和 `nm` 比；只看 `adrp/add` 会漏掉这种形态，也漏掉"链接期就绑错"这种失败。
+
+仿真（`tests/metaclass-simtest/`）也跟着换了对象：它原来镜像 `postModLoad` 的扫描分支，
+而那段代码已经不在像里——镜像删掉的代码等于证明空气。现在它跑 A–G 七组：健康链、gate 四种判决
+（`base-ok` / `base-abi` / `base-alien` / `base-free` + skip-gate 参数）、哨兵**只读不修**、
+走链的环上限（`depth=-65`，不自旋）、镜像的环绕/钳位/锁被占三种形态、面板滚掉之后 `pub`
+那一枪还在、以及健康路径的完整序言。
+
+### v43 的判读表（同样是可证伪的预测）
+
+| 面板 | 结论 | 下一件事 |
+|---|---|---|
+| `K5x:trust_cache_lock_init`（插在 `dtrace_early_init` 与 `OSKext…KextBootstrap` 之间，后面的 K 编号因此整体 +1） | 补丁那条分支跑了 | 看第 2、3 行 |
+| **没有** `lock_rw.c:1400`，`B19:at_mountroot` 之后出现新的 `U`/`B` 里程碑 | init 起来了，H17 结案 | 战线移到用户态（launchd / 签名判决） |
+| 仍然 `lock_rw.c:1400`，但**已有** `trust_cache_lock_init` | **反证**：炸的不是这把锁，是另一把非睡眠锁 | 21 帧重新符号化，按新地址找锁的持有者 |
+| 完全没有 `trust_cache_lock_init`，K 编号也没位移 | 补丁没进像 | 先跑 audit 的 `K` 段，再决定重打 |
+| 出现 `img4`/`AppleImage4`/`amfi` 字样的新 panic，或 `unable to query trust caches: amfi interface not available` 之后停住 | `img4if/amfi` 未注册那一类：TC 进 payload 从"下一步"变成硬前置 | 做 `CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + `kernel.macho.trustcache` |
+| 画面变成 `PreBoard`/`SpringBoard` 相关行 | 存储 + 根卷 + exec 全线打通 | 换战线：显示 / 输入 / launchd 约束 |
+
+拍照要什么：① `K49 → K60` 那一页（确认 `trust_cache_lock_init` 插进去了、`M:stalled` 成片刷屏
+真的没了）；② `U10x → 最后一屏`（`at_mountroot` 之后走到哪）；③ 若还有 `frames=…`，把它连
+`pages=/free=` 拍全，地址要逐位可读。
+
+### 顺带挖出来的独立问题（记进 porting.toml，别丢）
+
+`board.toml` 声明 `defconfig = "liuqin_defconfig"`，而**实际构建用的** `out/liuqin/.config`
+与 `configs/liuqin_boot_defconfig` 逐字节相同（`CONFIG_XNU_TRUST_CACHE_RUNTIME=n`、
+`CONFIG_XNU_BOOT_PROGRESS=n`）。这两个文件从 11-16 起就没被板级声明重新生成过。
+v43 不去动它（换 defconfig 会一次性翻掉几十个 `CONFIG_XNU_*` 人格开关，属于另一轮），
+但要么让构建在 defconfig 变化时强制重生成 `.config`，要么把 `board.toml` 改成如实声明——
+**不能继续留着一个会误导下一轮的假声明。**
