@@ -24,7 +24,7 @@ v43 **未上机**，结论全部来自主机侧：生产构建、62 项进像反
                                ABL 的 DTB 身份校验、内存表冲突（rmtfs）、可复用固件输入
     docs/porting-plan.md       四阶段计划、通过标准、当前阻塞、立刻可做的事
     docs/liuqin-usb-debug.md   内核 USB CDC-ACM 调试口（LIQDBG001）：开关、四道自检门、移植对照表
-    docs/boot-rounds-v35-v43.md  逐轮判读：改了什么、照片看到什么、哪些假设被证伪
+    docs/boot-rounds-v35-v44.md  逐轮判读：改了什么、照片看到什么、哪些假设被证伪
     scripts/audit-h16f-image.py  一条命令证明"该在的在、该没的没"（62 项，按符号边界取反汇编）
     drivers/ShengUfs/          SM8475 UFS/SMMU/根存储驱动 fork（分支 liuqin-sm8475），
                                tests/check_legacy_descriptors.py 是上游 descriptor oracle
@@ -125,7 +125,7 @@ Failed to mount root device @IOKitBSDInit.cpp:989
 `kprintf/printf` 不进镜像（补丁里就有 `%08x` 的打印）；③ 持有 `IOBlockStorageDevice` 名字的对象在
 `0xfffffff006add1d0`，与编译期那个差**正好 16 MiB、低 24 位相同**，且不在内核镜像任何段内（zone 对象）
 ——要么家族类被复制进 zone，要么一个 −16 MiB 的 slide 被单边应用。v41 一次照片分开它们。
-逐行判读见 [docs/boot-rounds-v35-v43.md](docs/boot-rounds-v35-v43.md) 的「v40 实机判读」。
+逐行判读见 [docs/boot-rounds-v35-v44.md](docs/boot-rounds-v35-v44.md) 的「v40 实机判读」。
 
 v38 实机点名（IMG_7059–7063）：
 
@@ -197,7 +197,7 @@ M:stalled scan BAD h=0xfffffff568caffe0 cnt=1 c0=0xac c1=0x6
 `fastboot boot`（纯内存，不写分区）。
 
 诊断手段：面板里程碑控制台（`K`/`B`/`U`/`I`/`M:` 前缀）+ 1 MiB 环形缓冲 + USB 调试口。
-逐轮改动、照片判读与被证伪的假设都固化在 **[`docs/boot-rounds-v35-v43.md`](docs/boot-rounds-v35-v43.md)**；
+逐轮改动、照片判读与被证伪的假设都固化在 **[`docs/boot-rounds-v35-v44.md`](docs/boot-rounds-v35-v44.md)**；
 主机侧回归 `tests/metaclass-simtest/run.sh`（v43 起场景是 A–G：健康链只打 `mc-ok`、gate 的四种判决
 ＋ skip-gate 参数、哨兵**只报告不修**、走链遇到环与外来地址时既不自旋也不解引用、镜像的环绕/钳位/
 锁被占三种形态、面板滚掉之后 `pub` 那一枪还在、健康序言的完整输出；四个 `.inc` 由 `extract.py`

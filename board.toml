@@ -55,7 +55,7 @@ windows = [
 # (schema 1 -- [kernel] defconfig is only consulted for the work-dir name under schema 2,
 # see UniXNU/scripts/unixnu/config.py:159).  It used to say liuqin_defconfig while the tree
 # was configured with liuqin_boot_defconfig, and that lie cost five rounds on H17
-# (CONFIG_XNU_TRUST_CACHE_RUNTIME=n, docs/boot-rounds-v35-v43.md).  Proven by
+# (CONFIG_XNU_TRUST_CACHE_RUNTIME=n, docs/boot-rounds-v35-v44.md).  Proven by
 # scripts/check-defconfig.py; flip this back only together with `unixnu defconfig`.
 defconfig = "liuqin_boot_defconfig"
 # Archive builders of the kernel step, in order: unixnu runs them between the
@@ -246,13 +246,21 @@ kernel_args = [
   # trust-cache query that AMFI runs on launchd's cdhash. The lock is only made sleepable
   # inside trust_cache_runtime_init(), which this configuration compiles out (see
   # patches/xnu/zzzz-liuqin-trust-cache-lock-init.patch), so the patch answers the panic.
-  # These two args answer the *decision*: the static trust caches are not in the payload yet
-  # (out/liuqin/payload/payload.json trust_cache_sha256 = null), so no cdhash can come back
-  # trusted. Both are bring-up switches; retire them with the TC line -- flip
-  # CONFIG_XNU_TRUST_CACHE_RUNTIME=y in the active defconfig and ship the two IPSW trust
-  # caches that board.toml already fetches.
+  # v43 added a second switch as well and the tablet answered for it: AMFI itself refuses
+  # cs_enforcement_disable and panics during its own start(), inside mac_policy_initmach
+  # (K51) -- "can't has cs_enforcement_disable" @AppleMobileFileIntegrity.cpp:5261, frames
+  # 0x...4ac9834 / 0x...4ab4fa8 / OSKext::start+0x370 / OSKext::load /
+  # KLDBootstrap::loadSecurityExtensions() / mac_policy_initmach+0x18. That is 16 boot
+  # stages *earlier* than the wall it was meant to work around, so it is out (v44).
+  # The census that makes this a fact and not a guess: `strings kernel.macho | grep "can't
+  # has"` yields exactly one fatal boot-arg check, and it names cs_enforcement_disable;
+  # amfi_get_out_of_my_way appears only as a boot-arg name, with no fatal check, so the
+  # judgement switch stays. Both are bring-up switches and retire with the TC line -- flip
+  # CONFIG_XNU_TRUST_CACHE_RUNTIME=y and ship the two IPSW trust caches board.toml fetches.
+  # v43 also proved the ordering that line needs: loadSecurityExtensions() starts AMFI and
+  # AppleImage4 at K51, strictly before the K52 trust_cache_init block, so img4if and amfi
+  # are already registered when trust_cache_runtime_init() checks them.
   "amfi_get_out_of_my_way=1",
-  "cs_enforcement_disable=1",
   "boot-ui-focus=PreBoard",
   "boot-ui-focus2=SpringBoard",
   "boot-ui-focus3=backboardd",

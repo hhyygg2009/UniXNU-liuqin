@@ -15,7 +15,7 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
 | 存储与根卷 | [UFS 存储](https://unixnu.com/zh/porting/ufs)、`drivers/ShengUfs/`（分支 `liuqin-sm8475`） |
 | 内核 | [修改 XNU](https://unixnu.com/zh/xnu/source-and-patches)、`patches/xnu/` 序列与 `.patches.sha256` 戳 |
 | 镜像与启动 | [构建与启动](https://unixnu.com/zh/building)、[启动验证顺序](https://unixnu.com/zh/porting/bring-up)、[日志抓取](https://unixnu.com/zh/porting/log-capture) |
-| 本板逐轮判读 | `docs/boot-rounds-v35-v43.md`（v35→v40 每轮改了什么、照片看到什么、哪些假设被证伪） |
+| 本板逐轮判读 | `docs/boot-rounds-v35-v44.md`（v35→v40 每轮改了什么、照片看到什么、哪些假设被证伪） |
 
 ## 硬性约束（踩过才知道的）
 
@@ -51,8 +51,16 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   映射**；落在原厂 kernel 本体段里的对象（继承自内核的 vtable/方法）**不要绑绝对地址**，
   交回链接期按符号名解析。H16 追了五天"谁涂写了 superClassLink"，真相是绑定指向了
   `__common` 里别人的存储（见 boot-rounds 的 v41 根因节）。
+- **给 codeless 组件加 boot arg 之前，先在镜像里数它的致命串。** AMFI / AppleImage4 / APFS 这些
+  组件是**原厂二进制**（`kernel.json` 的 `codeless_components`），我们没有它们的源码，它们对
+  参数的态度只有"炸"和"不炸"两种。v43 加了 `cs_enforcement_disable=1`，AMFI 在自己 `start()`
+  里就 `panic("can't has cs_enforcement_disable")`（`AppleMobileFileIntegrity.cpp:5261`，
+  在 `mac_policy_initmach → KLDBootstrap::loadSecurityExtensions()`，K51），比它要绕开的那堵墙
+  早 16 个启动阶段。一条命令就看清：`strings -a kernel.macho | grep "can't has"`——全镜像只有
+  这一条，而 `amfi_get_out_of_my_way` 没有任何 fatal 检查，所以它留、`cs_enforcement_disable` 撤。
+  audit 的 `Y-` 段把这件事变成了静态守卫（参数不在 payload 里 + 那条串恰好 1 次 + 无辜那条 0 次）。
 - **内核补丁是否真的进像，用反汇编证明，不要用源码 diff 证明。** 现成的一条命令：
-  `python3 scripts/audit-h16f-image.py`（v43 起 **62 项**，文件名保留是因为记录里到处引用它；
+  `python3 scripts/audit-h16f-image.py`（v44 起 **64 项**，文件名保留是因为记录里到处引用它；
   它现在同时证明**"该在的在"和"该没的没"**——清理轮次的风险不是新代码没进去，是旧代码还在里面）：
   `S+/S-` 符号在/不在、`T+/T-` 格式串在/不在、`B` 绑定落在我们自己的段里（`__PRELINK_DATA` /
   `__PLK_DATA_CONST`，且没有一条指回 `__common`）、`K` `lck_rw_init(trust_cache_rt_lock, grp, 0)`
@@ -90,7 +98,7 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
 主机侧回归（不需要交叉编译，也不需要上机 —— 平板不在时照样能推进一整轮）：
 
     python3 scripts/check-defconfig.py                                # 声明/选定/.config 三者一致
-    ./unixnu build kernel && python3 scripts/audit-h16f-image.py      # 生产构建 + 进像证明（62 项）
+    ./unixnu build kernel && python3 scripts/audit-h16f-image.py      # 生产构建 + 进像证明（64 项）
     tests/metaclass-simtest/run.sh                                   # ALL SIM ASSERTIONS PASS（A–G）
     python3 drivers/ShengUfs/tests/check_legacy_descriptors.py \
         --output <dir> --compiler g++                                # PASS 14/14

@@ -6,7 +6,7 @@ while the config the build actually consumed was
 ``out/liuqin/.config`` -- byte-identical to ``configs/liuqin_boot_defconfig``,
 which has ``CONFIG_XNU_TRUST_CACHE_RUNTIME=n``.  A defconfig edit is silently
 inert when the build reads ``.config`` instead, and reasoning from the
-declaration led us five rounds astray (docs/boot-rounds-v35-v43.md, H17).
+declaration led us five rounds astray (docs/boot-rounds-v35-v44.md, H17).
 
 So the declaration is now the truth (``liuqin_boot_defconfig``) and this script
 proves the three agree.  It checks nothing about the image: for whether a

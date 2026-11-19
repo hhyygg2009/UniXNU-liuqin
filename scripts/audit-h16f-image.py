@@ -364,15 +364,29 @@ def main():
           f'{got_hits[0][1].split("\t")[-1]} -> {meta:#x}' if got_hits else 'no literal/GOT match')
 
     # ---- optional: the payload carries the bring-up switches ---------------------
+    # v43 on device: AMFI is a *codeless* component -- Apple's own binary, not our source --
+    # and it refuses cs_enforcement_disable. It panics inside its own start(), which runs at
+    # K51 inside mac_policy_initmach -> KLDBootstrap::loadSecurityExtensions(): "can't has
+    # cs_enforcement_disable" @AppleMobileFileIntegrity.cpp:5261. That is sixteen boot stages
+    # BEFORE the trust-cache wall the arg was meant to work around, so the arg is out (v44)
+    # and must stay out. The census below is why that is a fact and not a preference: the
+    # image carries exactly one fatal boot-arg check, and it names this one; nothing refuses
+    # amfi_get_out_of_my_way, so the judgement switch stays.
     payload = Path(args.payload)
     if payload.is_file():
         pb = payload.read_bytes()
-        for flag in (b'amfi_get_out_of_my_way=1', b'cs_enforcement_disable=1',
-                     b'liuqin_allow_unsealed_root=1'):
+        for flag in (b'amfi_get_out_of_my_way=1', b'liuqin_allow_unsealed_root=1'):
             check(f'Y  payload carries {flag.decode()}', pb.count(flag) >= 1,
                   f'{pb.count(flag)}x')
+        absent = pb.count(b'cs_enforcement_disable=1')
+        check('Y- payload does NOT carry cs_enforcement_disable=1', absent == 0, f'{absent}x')
     else:
-        print(f'(no payload at {payload}: the boot-arg checks were skipped)')
+        print(f'(no payload at {args.payload}: the boot-arg checks were skipped)')
+    fatal = blob.count(b"can't has cs_enforcement_disable")
+    check("Y  AMFI really refuses cs_enforcement_disable (the reason it is out)",
+          fatal == 1, f'{fatal}x')
+    refused = blob.count(b"can't has amfi_get_out_of_my_way")
+    check('Y- ... and nothing refuses amfi_get_out_of_my_way', refused == 0, f'{refused}x')
 
     print()
     if failures:

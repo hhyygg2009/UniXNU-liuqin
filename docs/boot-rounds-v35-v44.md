@@ -1,4 +1,4 @@
-# 逐轮判读：v35 → v43（2026-11-16 → 2026-11-19）
+# 逐轮判读：v35 → v44（2026-11-16 → 2026-11-19）
 
 K49:PE_init_iokit 处的 `Kernel data abort` 从 v35 第一次可读，到 v38 被彻底消掉并点名。
 这一页记录每一轮改了什么、照片看到什么、以及被证伪的假设——避免以后走回头路。
@@ -509,3 +509,108 @@ else if (get_preemption_level() == 0) {
 v43 不去动它（换 defconfig 会一次性翻掉几十个 `CONFIG_XNU_*` 人格开关，属于另一轮），
 但要么让构建在 defconfig 变化时强制重生成 `.config`，要么把 `board.toml` 改成如实声明——
 **不能继续留着一个会误导下一轮的假声明。**
+
+---
+
+## v43 实机判读（IMG_7179–7196，2026-11-19 22:05 上机）：诊断剪干净了，但两条放行参数里有一条是致命的
+
+### 先说成了什么
+
+**H16 的诊断确实剪干净了。** 整批照片里没有一行 `M:stalled` / `M:bad[` / `M:fp` / `M:alien` /
+`M:mc`，面板**第一次**显示真正的内核控制台：
+
+```
+kdp_core zlib memory 0x700
+Serial requested, consistent debug disabled or debug bot arg not present, configuring debugging over serial
+NVMAM.cp::initImageFormat:143 - NVMAM size is 8192 bytes
+zone_init: map VM 0xfffff1a96ab00:0xfffff20fd300 (3686M) ... zone_init: extra 0:0 (0B)
+VM bootstrap done: 39 maps, 12 entries and 16 holes left
+Firehose configured: 16 chunks, 8 io pages
+OSLog stream configured: stream: 8192 bytes, cache: 212 bytes
+Long logs support configured: size: 16384 ... Log queues configured: slot count: 64, per-slot size: 32768, total size: 2097152
+```
+
+这就是剪诊断的全部理由：那些扫描行一直在把这些东西顶出面板。
+
+**然后炸在 AMFI 自己身上**，`K51:mac_policy_initmach` 之后：
+
+```
+"can't has cs_enforcement_disable" @AppleMobileFileIntegrity.cpp:5261
+frames fffffff004ac9834 fffffff004ab4fa8 fffffff0078a5b3c fffffff0078a2a50 fffffff0078a1d68
+       fffffff0078a1c84 fffffff007a01094 fffffff0079b0b9c fffffff0072cdb94 fffffff007420664
+pages=0x000000000000bac0
+free=0x000000000000b4c4
+```
+
+**v42 那堵 `lock_rw.c:1400` 的墙没有出现——但这一轮不能算它被修好了**：本轮死得比它早 16 个
+启动阶段，根本没走到 exec init。H17 的证据仍然只有主机侧那两条静态守卫（audit 的 `K` / `Q` 段）。
+
+### 十帧全部符号化（v43 内核 `e8233d2e047e…`）
+
+| 帧 | 符号 |
+|---|---|
+| `0xfffffff004ac9834`、`0xfffffff004ab4fa8` | AMFI 自己的代码（`__PLK_TEXT_EXEC`；它是 **codeless 组件**，原厂二进制，原厂 VA 减 0x1000000） |
+| `0xfffffff0078a5b3c` | `OSKext::start(bool)+0x370` |
+| `0xfffffff0078a2a50` | `OSKext::load(unsigned char, unsigned char, OSArray*)+0xe8` |
+| `0xfffffff0078a1d68` | `OSKext::loadKextWithIdentifier(OSString*, …)+0xac` |
+| `0xfffffff0078a1c84` | `OSKext::loadKextWithIdentifier(char const*, …)+0x50` |
+| `0xfffffff007a01094` | `KLDBootstrap::loadSecurityExtensions()+0x174` |
+| `0xfffffff0079b0b9c` | `mac_policy_initmach()+0x18` |
+| `0xfffffff0072cdb94` | `kernel_bootstrap_thread()+0x8b0` |
+| `0xfffffff007420664` | `Call_continuation+0x44` |
+
+和 v42 的 21 帧比：尾巴一样是 `Call_continuation`，但整条链是 **kext 启动**，不是 exec。
+`pages/free` 也从 `babd/a9f2` 变成 `bac0/b4c4`——分配得更少，同样说明死得更早。
+
+### 根因：AMFI 是原厂二进制，它不接受这个参数
+
+主机侧一条命令就把这件事变成事实而不是猜测：
+
+```
+$ strings -a kernel.macho | grep "can't has"
+"can't has cs_enforcement_disable" @%s:%d            ← 全镜像只有一条
+$ strings -a kernel.macho | grep -E "amfi_get_out_of_my_way|cs_enforcement_disable"
+cs_enforcement_disable / amfi_get_out_of_my_way / cs_enforcement_disable / "can't has cs_enforcement_disable" @%s:%d
+```
+
+`amfi_get_out_of_my_way` 只作为 boot-arg 名字出现，**没有任何 fatal 检查**；
+`cs_enforcement_disable` 有一条，而且就在 AMFI 里。所以 v43 加的两条放行参数里，
+`cs_enforcement_disable=1` 是**自杀**，另一条是无辜的。
+
+**规矩（已写进 AGENTS）：给 codeless 组件加 boot arg 之前，先在镜像里数它的致命串。**
+`grep -a` 一下 `can't has` / `panic(` 类字符串，比读十遍文档便宜，而且不会骗人。
+
+### 顺带拿到 TC 那条线的地基（这条值一轮）
+
+`mac_policy_initmach()`（K51）里就调 `KLDBootstrap::loadSecurityExtensions()`，**它 start 了
+AMFI 与 AppleImage4**；而 `startup.c` 的 trust-cache 块在 K52。于是：
+
+> `img4if` 与 `amfi` 在 `trust_cache_runtime_init()` 检查它们之前**已经注册**。
+
+mondrian 文档里那条"AppleImage4 startfunc 被跳过 → `img4if==NULL` → panic"的地雷，**在这块板子
+的这个顺序上不成立**。TC 线（`CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + 把 board.toml 已经抓取的两份
+IPSW trust cache 打进 payload + ADT `chosen/memory-map/TrustCache`）因此从"有风险的未知"
+降级成"可执行的下一步"。
+
+### v44 改什么（一条参数，别的都不动）
+
+- 删 `cs_enforcement_disable=1`；启动参数 **967 → 942 B**（< 1000 ✓）
+- **内核没重编**（仍是 `e8233d2e…`）：只重打 payload → `wrap-payload-mbr.py` → bootimg，
+  产物 `69,525,504 B` ✓
+- audit 从 62 → **64 项**，新增的三条把这条教训变成静态守卫：
+  `Y- payload does NOT carry cs_enforcement_disable=1`、
+  `Y  AMFI really refuses cs_enforcement_disable`（镜像里那条串恰好 1 次）、
+  `Y- ... and nothing refuses amfi_get_out_of_my_way`（0 次）
+
+### v44 判读表——同样是可证伪的预测
+
+| 面板 | 结论 | 下一件事 |
+|---|---|---|
+| `K52:trust_cache_lock_init`（在 `dtrace_early_init` 与 `OSKext…KextBootstrap` 之间） | H17 那条补丁这条路跑通了 | 看第 2、3 行 |
+| 越过 K51 一路到 `B19:at_mountroot`，**没有** `lock_rw.c:1400`，之后出现新里程碑 | H17 结案，战线进用户态 | 记第一批 launchd / 签名判决行 |
+| **已有** `trust_cache_lock_init`，却仍炸 `lock_rw.c:1400` | **反证**：炸的是另一把非睡眠锁 | 十帧/二十一帧重新符号化，按新地址找那把锁的主人；**别再动这个补丁** |
+| 又出现 AMFI 的 `"can't has …"` 字样 | 还有别的放行参数被拒 | 数串、撤参数，别改内核 |
+| 停在 `validation of code signature failed through MACF policy: N` 或 trust-cache 相关 printf | `amfi_get_out_of_my_way` 没能短路判决 | 做 TC 线（defconfig 翻 `y` + 两份 cache 进 payload + ADT memory-map） |
+
+拍照要什么：① `K49 → K60` 那一页（`trust_cache_lock_init` 在不在）；② `B17/B19` 到最后一屏
+（`at_mountroot` 之后走到哪）；③ 若还有 `frames=`，连 `pages=`/`free=` 一起拍全。
