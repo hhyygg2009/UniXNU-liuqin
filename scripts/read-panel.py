@@ -124,6 +124,7 @@ class Vocabulary:
         self.milestones: dict[str, set[str]] = {}
         self.templates: list[Template] = []
         self._by_shape: dict[str, Template] = {}
+        self.dropped: list[str] = []
 
     def add_milestone(self, tag: str, name: str) -> None:
         self.milestones.setdefault(tag.upper(), set()).add(name)
@@ -145,10 +146,43 @@ class Vocabulary:
     def names(self) -> set[str]:
         return {n for s in self.milestones.values() for n in s}
 
+    def restrict_to_image(self, kernel: Path) -> None:
+        """Drop everything the built image cannot print.
+
+        The tree is not the image. `patches/xnu/*.patch` carries context lines, feature-gated
+        blocks and `#if`s, so mining the tree advertises names this build never emits --
+        `kernel_bootstrap_log("trust_cache_init")` sits in the liuqin patch as context while
+        the block containing it is compiled out, and the reader "corrected" unrelated K rows
+        into `K34:trust_cache_init`, a string that is not in kernel.macho at all. The image
+        is the only authority on what can appear on the panel, so every name and every
+        template head is checked against its bytes; anything absent is dropped and reported.
+        """
+        blob = kernel.read_bytes()
+        for tag in list(self.milestones):
+            keep = {n for n in self.milestones[tag] if (n + "\0").encode() in blob}
+            for n in self.milestones[tag] - keep:
+                self.dropped.append(f"{tag}:{n}")
+            self.milestones[tag] = keep
+            if not keep:
+                del self.milestones[tag]
+        kept = []
+        for t in self.templates:
+            head = t.chunks[0]
+            # template heads keep their spaces but the image stores the literal; compare the
+            # first literal word long enough to be unambiguous
+            probe = head.strip().encode("utf-8", "replace")
+            if len(probe) < 8 or probe in blob:
+                kept.append(t)
+            else:
+                self.dropped.append(f"T:{head!r}")
+        self.templates = kept
+        self._by_shape = {t.shape: t for t in self.templates}
+
     def summary(self) -> str:
         ms = sum(len(v) for v in self.milestones.values())
         tags = " ".join(f"{k}:{len(v)}" for k, v in sorted(self.milestones.items()))
-        return f"{ms} milestone names ({tags}), {len(self.templates)} line templates"
+        extra = f", dropped {len(self.dropped)}" if self.dropped else ""
+        return f"{ms} milestone names ({tags}), {len(self.templates)} line templates{extra}"
 
     def describe(self) -> str:
         lines = [f"vocabulary mined from {REPO}", f"  {self.summary()}", "", "line templates:"]
@@ -227,7 +261,8 @@ def field_label(prev_chunk: str) -> str:
     return m.group(1) if m else ""
 
 
-def load_vocabulary(extra: list[str] | None = None) -> Vocabulary:
+def load_vocabulary(extra: list[str] | None = None,
+                    kernel: "Path | None" = None) -> Vocabulary:
     roots = [REPO / "patches" / "xnu", REPO / "drivers", REPO / "stubs"]
     roots += [Path(e) for e in (extra or [])]
     roots += [Path(p) for p in os.environ.get("XNU_PATCH_DIR", "").split(os.pathsep) if p]
@@ -262,6 +297,8 @@ def load_vocabulary(extra: list[str] | None = None) -> Vocabulary:
                 vocab.add_template(m.group(1), {path.name}, window + "\n" + file_text)
     # order matters for reporting: the longest, most specific templates first
     vocab.templates.sort(key=lambda t: -sum(len(c) for c in t.chunks))
+    if kernel is not None:
+        vocab.restrict_to_image(kernel)
     return vocab
 
 
@@ -801,22 +838,79 @@ def _match_template(text: str, tpl: Template):
     return cost, fields, tail
 
 
-MILE_RE = re.compile(r"^([KBTUIOPD])[^0-9A-Za-z]{0,2}([0-9oOlIiSBGzZ]{1,3})[.;:_|lI]?([A-Za-z][A-Za-z0-9_.+-]*)$", re.I)
+# The glyph class in front of a milestone's number is not hand-typed any more: it is every
+# glyph the measured confusion model says can stand in for a digit (`8B`, `9gq`, `1lIi|!t` …).
+# Hand-picking that class is what made rows like `B11q:at_hashinit` unparseable: `q` was in
+# SUBSTITUTE but not in the class, so the row was thrown away whole.
+NUMCLASS = "[0-9" + "".join(
+    sorted({c for g in GROUPS for c in g if not c.isdigit() and any(d.isdigit() for d in g)})) + "]"
+MILE_RE = re.compile(
+    rf"^([KBTUIOPD])[^0-9A-Za-z]{{0,2}}({NUMCLASS}{{1,3}})[.;:_|lI]?([A-Za-z][A-Za-z0-9_.+-]*)$",
+    re.I)
+# The head of a milestone row is one glyph in front of a number, which is the most fragile
+# thing on the panel: the camera eats it (`B155:at_bsd_bufferinit` -> `155:t_bsd_buffcrinit`).
+# Such a row used to be RAW, i.e. the stage name -- the part that says how far BSD got --
+# was thrown away with the letter. These two fallbacks match number+name without a head, and
+# the colon form only accepts a head that is nothing but (letter)(digits), so a template
+# line can never be mistaken for a milestone.
+MILE_HEADLESS_RE = re.compile(
+    rf"^({NUMCLASS}{{1,4}})[.;:_|lI]?([A-Za-z][A-Za-z0-9_.+-]{{3,}})$", re.I)
+MILE_COLON_RE = re.compile(
+    rf"^([KBTUIOPD]?{NUMCLASS}{{1,4}}):(?=[A-Za-z0-9])(.+)$", re.I)
 
 
 def _match_milestone(text: str, vocab: Vocabulary):
     m = MILE_RE.match(text)
-    if not m:
-        return None
-    tag, number, name = m.group(1).upper(), m.group(2), m.group(3)
+    headless = False
+    if m:
+        tag, number, name = m.group(1).upper(), m.group(2), m.group(3)
+    else:
+        m = MILE_HEADLESS_RE.match(text)
+        if m:
+            headless, tag, number, name = True, "", m.group(1), m.group(2)
+        else:
+            m = MILE_COLON_RE.match(text)
+            if not m:
+                return None
+            headless = True
+            head = m.group(1)
+            tag = head[0].upper() if head[0].isalpha() else ""
+            number = head[1:] if tag else head
+            name = m.group(2)
     pool = vocab.milestones.get(tag) or set()
     if not pool:
-        pool = vocab.names
+        # A tag this build never prints must not borrow another subsystem's names: with a
+        # two-name K pool, every unreadable K row snapped to whichever K name was closer.
+        # Saying nothing (RAW) is the only honest answer.
+        return None
     best = min(pool, key=lambda c: distance(c, name))
     cost = distance(best, name)
     if cost > max(1.5, 0.34 * len(best)):
         return None
-    grade = "EXACT" if best == name else "FIXED"
+    # The tag is not decoration: K is the kernel bootstrap, B the BSD stages, U this driver,
+    # I the mount path, T the thread calls -- a round's verdict can hang off one letter. The
+    # camera blurs that letter as easily as any glyph (`U137` -> `i37`), so when the letter
+    # the camera produced cannot own the name it printed, and exactly one tag can, the name
+    # decides the tag. If several tags use the same name, say we do not know instead of
+    # keeping the guessed letter: answering with confidence on the wrong subsystem is the
+    # one failure this tool must never have (the v42 photos produced `I37:root-plan-fail`
+    # for a U row, and that grade was FIXED).
+    owners = {t for t, ns in vocab.milestones.items() if best in ns}
+    if headless:
+        # a row without its head may only be answered when the name has exactly one owner,
+        # and never better than FIXED: something in front of it is missing, by proof.
+        if len(owners) != 1 or cost > max(1.2, 0.28 * len(best)):
+            return None
+        if not tag:
+            tag = next(iter(owners))
+        grade = "FIXED"
+    else:
+        if tag not in owners:
+            if len(owners) == 1:
+                tag = next(iter(owners))
+            else:
+                return max(cost, 0.1), f"{tag}{_digits(number)}:{best}", "AMBIG", best
+        grade = "EXACT" if best == name else "FIXED"
     digits = _digits(number)
     # the counter is decorative for judgement; say so when it is not trustworthy
     if digits != number and not re.fullmatch(r"[0-9]+", number):
@@ -1213,6 +1307,10 @@ def main(argv=None) -> int:
     ap.add_argument("--round", help="judgement table round, e.g. v40")
     ap.add_argument("--rules", type=Path, default=REPO / "docs" / "panel-rules.toml")
     ap.add_argument("--syms", type=Path, help="nm-style symbol file to settle addresses")
+    ap.add_argument("--kernel", type=Path,
+                    default=REPO.parent / "UniXNU/out/liuqin/kernel/kernel.macho",
+                    help="the built image; names it cannot print are dropped from the "
+                         "vocabulary (pass '' to disable)")
     ap.add_argument("--list", action="store_true", help="print what this tree can print")
     ap.add_argument("--selftest", action="store_true", help="repair layer only, no OCR")
     ap.add_argument("--raw", action="store_true", help="also print the OCR text per line")
@@ -1224,7 +1322,15 @@ def main(argv=None) -> int:
     ap.add_argument("--max-lines", type=int, default=0)
     args = ap.parse_args(argv)
 
-    vocab = load_vocabulary(args.extra_vocab)
+    kernel = args.kernel if args.kernel and str(args.kernel) else None
+    if kernel and not kernel.is_file():
+        print(f"note: no image at {kernel}, vocabulary not restricted to what can print")
+        kernel = None
+    elif kernel:
+        kernel = kernel.resolve()
+    vocab = load_vocabulary(args.extra_vocab, kernel)
+    if vocab.dropped:
+        print("dropped (not present in the image): " + ", ".join(vocab.dropped))
 
     if args.debug_row:
         syms = load_syms(args.syms) if args.syms else None

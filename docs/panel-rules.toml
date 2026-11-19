@@ -194,7 +194,7 @@ round = "v42"
 id = "method-slot-relocation-wrong"
 verdict = "反证条件：崩在 0xfffffff00496… 段内 —— kext 侧方法槽不该位移"
 next = "回滚到只位移四条数据符号（emitted），方法槽保留原厂值"
-require = ['pc 0xfffffff00496']
+require = ['pc ?0xfffffff00496']
 
 [[signal]]
 round = "v42"
@@ -207,7 +207,7 @@ pattern = 'live size [0-9]+, compiled size [0-9]+'
 [[signal]]
 round = "v42"
 name = "非睡眠锁 panic（H17 的墙）"
-pattern = 'Taking non-sleepable RW lock with preemption enabled'
+pattern = 'sleepable RW lock|lock_rw'
 
 # ---------------------------------------------------------------------------
 # v43（H17 修复 + 剪诊断）：trust_cache_lock_init 是这一轮唯一的新证据
@@ -225,14 +225,14 @@ id = "h17-closed"
 verdict = "H17 结案：init 的 exec 过了，at_mountroot 之后出现新的用户态里程碑"
 next = "战线移到用户态（launchd/签名判决）；撤掉 amfi_get_out_of_my_way 之前先把 TC 打进 payload"
 require = ['at_mountroot', 'trust_cache_lock_init']
-forbid = ['lock_rw\.c:1400']
+forbid = ['sleepable RW lock|lock_rw']
 
 [[rule]]
 round = "v43"
 id = "another-nonsleepable-lock"
 verdict = "反证：已有 trust_cache_lock_init 却仍然 lock_rw.c:1400 —— 炸的是另一把非睡眠锁"
 next = "把 21 帧重新符号化（llvm-nm -m + 二分），按新地址定位那把锁的持有者"
-require = ['trust_cache_lock_init', 'lock_rw\.c:1400']
+require = ['trust_cache_lock_init', 'sleepable RW lock|lock_rw']
 
 [[rule]]
 round = "v43"
@@ -266,4 +266,4 @@ pattern = 'at_mountroot'
 [[signal]]
 round = "v43"
 name = "H17 的旧 panic 行"
-pattern = 'lock_rw\.c:1400'
+pattern = 'sleepable RW lock|lock_rw'
