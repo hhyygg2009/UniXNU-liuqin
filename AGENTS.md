@@ -75,6 +75,9 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   整块被编译掉，锁从没初始化，`exec init` 每次必炸（`lock_rw.c:1400`）。**想知道某个
   `CONFIG_XNU_*` 有没有生效，去镜像里找证据**：`grep -c <bootstrap字符串> kernel.macho`、
   `llvm-nm` 里那个函数存在但没有任何 `bl` 指向它，都比重复读 defconfig 可靠。
+  **已收口（2026-11-19）**：`board.toml` 现在声明实际生效的 `liuqin_boot_defconfig`，`scripts/check-defconfig.py`
+  证明"声明 = `out/state.json` 选定 = `.config` 字节"三者一致；换 defconfig 必须同时跑 `unixnu defconfig`，
+  否则这条守卫就是红的。
 
 ## 记录与检查
 
@@ -86,6 +89,7 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
 
 主机侧回归（不需要交叉编译，也不需要上机 —— 平板不在时照样能推进一整轮）：
 
+    python3 scripts/check-defconfig.py                                # 声明/选定/.config 三者一致
     ./unixnu build kernel && python3 scripts/audit-h16f-image.py      # 生产构建 + 进像证明（62 项）
     tests/metaclass-simtest/run.sh                                   # ALL SIM ASSERTIONS PASS（A–G）
     python3 drivers/ShengUfs/tests/check_legacy_descriptors.py \

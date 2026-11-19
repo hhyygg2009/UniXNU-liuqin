@@ -51,7 +51,13 @@ windows = [
 ]
 
 [kernel]
-defconfig = "liuqin_defconfig"
+# The declaration MUST equal what the build actually reads: ../UniXNU/out/liuqin/.config
+# (schema 1 -- [kernel] defconfig is only consulted for the work-dir name under schema 2,
+# see UniXNU/scripts/unixnu/config.py:159).  It used to say liuqin_defconfig while the tree
+# was configured with liuqin_boot_defconfig, and that lie cost five rounds on H17
+# (CONFIG_XNU_TRUST_CACHE_RUNTIME=n, docs/boot-rounds-v35-v43.md).  Proven by
+# scripts/check-defconfig.py; flip this back only together with `unixnu defconfig`.
+defconfig = "liuqin_boot_defconfig"
 # Archive builders of the kernel step, in order: unixnu runs them between the
 # bootstrap pass and the real link. Trimmed to what liuqin_boot_defconfig enables:
 # source corecrypto (prelink closure), the Apple-format device-tree platform expert

@@ -15,9 +15,13 @@ v43 **未上机**，结论全部来自主机侧：生产构建、62 项进像反
     board.toml                 板级描述（userdata LBA、splash、FD 窗口已填实测值）
     porting.toml               设备适配记录（schema_version = 1，14 个部分，逐条带证据）
     AGENTS.md                  agent 必读入口：职责、依赖、构建入口、记录链接、硬性约束
-    configs/liuqin_defconfig   内核配置（从 sheng 派生，PMGR/Adreno/UUID 标了 TODO）
+    configs/liuqin_boot_defconfig 当前生效的内核配置（board.toml 的 [kernel] defconfig
+                               就是它；scripts/check-defconfig.py 证明"声明 = 选定 = .config"。
+                               configs/liuqin_defconfig 是从 sheng 派生的另一份，尚未生效）
     docs/liuqin-hardware.md    硬件底账：已核实 / 仍未知，每条带来源
     docs/vendor-inputs.md      stock UEFI 抽出的 154 个厂商输入 + uefiplat.cfg 硬数据
+    docs/mainline-ubuntu-reference.md 同板 mainline Ubuntu（yzddmr6）逐值对照：
+                               ABL 的 DTB 身份校验、内存表冲突（rmtfs）、可复用固件输入
     docs/porting-plan.md       四阶段计划、通过标准、当前阻塞、立刻可做的事
     docs/liuqin-usb-debug.md   内核 USB CDC-ACM 调试口（LIQDBG001）：开关、四道自检门、移植对照表
     docs/boot-rounds-v35-v43.md  逐轮判读：改了什么、照片看到什么、哪些假设被证伪
@@ -97,8 +101,9 @@ v42 之后的战线已经**不在存储**：根卷挂上了。v43 对着 H17 修
 mac_vnode_check_signature → query_trust_cache → lck_rw_lock_shared`：exec `/sbin/launchd`
 时 AMFI 问"这个 cdhash 可信吗"。而那把 `trust_cache_rt_lock` 只会被
 `trust_cache_runtime_init()` 变成可睡眠锁——活跃配置里 `CONFIG_XNU_TRUST_CACHE_RUNTIME=n`
-（`out/liuqin/.config` 实际等于 `configs/liuqin_boot_defconfig`，而 `board.toml` 声明的是
-`liuqin_defconfig`，这两者不一致是个独立问题），整块被编译掉：`llvm-nm` 里
+（`out/liuqin/.config` 实际等于 `configs/liuqin_boot_defconfig`，而当时 `board.toml` 声明的
+是 `liuqin_defconfig` —— 那条不一致已在 2026-11-19 修正并加了守卫，见
+`scripts/check-defconfig.py`），整块 `trust_cache_runtime_init()` 被编译掉：`llvm-nm` 里
 `_trust_cache_runtime_init` 存在却**没有任何 `bl` 指向它**，`"trust_cache_init"` 字符串也不在像里。
 锁留在 `__common` 里零初始化 ⇒ `lck_rw_can_sleep=false` ⇒ 每次启动必炸。
 v43 的补丁就是在那条 `#else` 分支上把锁初始化好，并给空 `amfi` 一个 `KERN_NOT_FOUND`。
@@ -233,6 +238,10 @@ M:stalled scan BAD h=0xfffffff568caffe0 cnt=1 c0=0xac c1=0x6
   21H461 storage-bindings 离线推导、userdata Linux 构建、实机里程碑诊断与
   panic 可见化修复等系列迭代。
 - UniXNU 官方与各社区机型仓（尤其 sheng 模板与 mondrian 的 SM8475 实测数据）。
+- **yzddmr6/xiaomipad-6pro-mainline**（同板 liuqin 的 mainline Ubuntu，v0.8.0）：
+  它发布并被本机 ABL 接受的 boot DTB、板级 DTS 与厂商固件池，给了我们一批独立第二方
+  确认（GIC/UFS/timebase/splash/SMEM）和一个还没解决的冲突（rmtfs 落在我们 DXE Heap 里）。
+  对照记录：`docs/mainline-ubuntu-reference.md`。
 - 把 `OSMetaClass::postModLoad` 这一类崩溃讲清楚并给出实机可行形态的社区仓：
   **N1709/UniXNU-whyred**（延迟注册 + 重入闩 + ABI 闸；round 117 的重名 panic 复盘）、
   **tb128fu**（家族确实预链时的 storage 绑定形态）、**qiumochen/UniXNU-zizhan**、
