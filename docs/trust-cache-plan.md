@@ -37,6 +37,9 @@ TC 线是**正经**那一半：`CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + 把 21H461 �
    - bundle **61,356 B，sha256 `7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7`**
      ——**正好等于 `board.toml` 的第一条 pin**。在此之前那条 pin 从来没被验证过（`payload.json` 里
      `trust_cache_sha256` 一直是 null），现在它是被证明的。
+     第二条 pin `8900d6a9…` **不是这些输入能产出的**：两个仓里没有任何文件是这个 sha，它和第一条一起
+     从共享的 OS profile `profiles/os/ipados-17.7.11-21H461/profile.toml` 抄过来（`UniXNU-qemu/board.toml`
+     也带着同一对），语义只能是"别处签出来的 owner bundle 也允许上板"。v45 用的是第一条，脚本也只对第一条负责。
 2. **换分支会把驱动的 legacy 别名弄没，`archive-09` 必炸。**
    上一轮 22:44 为了试 `test-pr1`，把驱动子模块的 `origin` 指到了 `Fly116/ShengUfs`；
    `components.official_alias()` 只承认 `github.com/UniXNU/*`，于是 `./unixnu tree` 不再创建
@@ -45,9 +48,11 @@ TC 线是**正经**那一半：`CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + 把 21H461 �
    `clang: error: no such file or directory: .../tree/drivers/NativeUfs/NativeUfs.cpp`。
    修法（已做）：`git -C drivers/ShengUfs remote set-url origin https://github.com/UniXNU/ShengUfs.git`，
    维护者的仓改名 `fly116`，我们自己那条线继续用 `mine`（`hhyygg2009`，`.gitmodules` 也仍然指它）。
-3. **v44 的可复现性顺便验了。** 恢复到 `main` 之后重打 payload→MBR→bootimg，与已发布的
+3. **v44 的可复现性顺便验了两层。** ① 恢复到 `main` 之后重打 payload→MBR→bootimg，与已发布的
    `boot-liuqin-v44-no-cs-disable.img` **只差 71 个字节**：FAT 卷的创建时间戳 + ADT 里
-   `chosen/random-seed`（本来就该每次随机）。内核仍是 `e8233d2e…`，audit 仍是 **64/64 PASS**。
+   `chosen/random-seed`（本来就该每次随机）。② 更强的那条：`=n` 基准配置下**重跑 `./unixnu build kernel`
+   直接回到同一个 `e8233d2e…`**（逐字节），audit 仍是 **64/64 PASS**——所以 v45 那个 `d19280cf…`
+   的差值，确实只有"一个开关"那么多。
 4. **`out/` 曾经停在上游那一轮。** 上一轮 22:47–23:49 是从 `test-pr1` 构建的，`payload.json` 里的
    参数连 `amfi_get_out_of_my_way` 都没有——那种状态下 audit 会以 `Y payload carries
    amfi_get_out_of_my_way=1` 失败。**上机前先看 `payload.json` 的 `kernel_args`**，别看镜像文件名。

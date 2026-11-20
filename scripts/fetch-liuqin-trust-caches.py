@@ -154,6 +154,8 @@ def main():
                      'sha256': hashlib.sha256(d).hexdigest()} for c, m, d, n in modules],
         'bundle': str(bundle_path.resolve()), 'bundle_bytes': len(bundle),
         'bundle_sha256': digest, 'board_pins': allowed, 'pin_match': pinned,
+        'matched_pin_index': allowed.index(digest) if pinned else None,
+        'unexplained_pins': [p for p in allowed if p != digest],
         'modified': False, 'loader_contract': 'DarwinBoot ValidTrustCaches, version-2 modules only',
     }
     report_path.write_text(json.dumps(report, indent=2) + '\n')
@@ -168,7 +170,14 @@ def main():
     if not pinned:
         raise SystemExit('FAIL: the bundle sha256 is not one of board.toml [payload] '
                          'trust_cache_sha256 -- the pin and the IPSW disagree, do not ship this')
-    print(f'PASS: matches board.toml pin; payload may carry it')
+    print(f'PASS: matches board.toml pin #{allowed.index(digest) + 1}; payload may carry it')
+    others = [p for p in allowed if p != digest]
+    if others:
+        print('note: the other pin(s) ' + ', '.join(o[:12] + '...' for o in others) +
+              ' are NOT produced by these inputs (they come from the shared OS profile '
+              'profiles/os/ipados-17.7.11-21H461/profile.toml; nothing in either repository hashes to them). '
+              'They are accepted by the board so an owner-signed bundle built elsewhere can also ship; '
+              'this script makes no claim about them.')
     print(f'use:  ./unixnu build payload --kernel out/liuqin/kernel/kernel.macho '
           f'--unique-chip-id 0x84750A0B0C0D0001 --trust-cache {bundle_path}')
     return 0
