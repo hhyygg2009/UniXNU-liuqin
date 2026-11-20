@@ -1,0 +1,58 @@
+# Experiment configuration: liuqin_boot_defconfig with the trust-cache runtime compiled IN.
+# The single difference is CONFIG_XNU_TRUST_CACHE_RUNTIME=y, which makes build-xnu-4k-baseline.sh
+# pass -DXNU_NATIVE_TRUST_CACHE=1 to startup.o, so native-trust-cache-runtime.patch takes its
+# #if branch: kernel_bootstrap_log("trust_cache_init"), trust_cache_runtime_init() and
+# load_static_trust_cache() instead of the H17 lock-only #else branch.  Everything else is
+# byte-identical to liuqin_boot_defconfig.
+#
+# Only the components that either live entirely in the XNU patch set or are built
+# by the base UniXNU scripts are enabled. Everything that needs a device-side
+# archive builder this repository does not carry yet (NativeAES, NativeUfs,
+# NativeVirtioBlock/RamBlock, legacy/mobile display, verified-owner root chain,
+# boot-progress page, Adreno) stays off, so `unixnu build kernel` can finish.
+# The port starts at bsd_init(), which is reached without any of them.
+
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_NATIVE_ARCH_TIMER=y
+CONFIG_XNU_NATIVE_PAN=y
+CONFIG_XNU_DT_PANIC_REGION=y
+# liuqin ADT has no pram node: keep gPanicBase valid with a kernel-owned 128 KiB buffer.
+CONFIG_XNU_LIUQIN_VOLATILE_PANIC_LOG=y
+# The defconfig opts into the [kernel] archives builders of board.toml: the kernel
+# link needs their output (corecrypto closure, ArmDTPlatform, ArmCpu, libpthread).
+CONFIG_XNU_BUILD_ARCHIVES=y
+CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+
+# bring-up only, route-plan H9: VerifiedRoot policy chain not ported to Linux yet;
+# this compiles the transport with NATIVE_VERIFIED_BLOCK=0 (unverified reads).
+# Do not copy this line to a release config; liuqin_defconfig keeps =y.
+CONFIG_XNU_NATIVE_UFS=y
+CONFIG_XNU_NATIVE_UFS_VERIFIED=n
+CONFIG_XNU_NATIVE_AES=y
+# the schema-1 driver script builds into build/native-aes; point the link at it
+CONFIG_XNU_NATIVE_AES_ARCHIVE="{tree}/build/native-aes/libSoftwareAES.a"
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=n
+CONFIG_XNU_NATIVE_RAM_BLOCK=n
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+CONFIG_XNU_NATIVE_ADRENO=n
+CONFIG_XNU_BOOT_PROGRESS=n
+CONFIG_XNU_SOURCE_MOCKFS=n
+CONFIG_XNU_NATIVE_CS_HASH_CACHE=n
+CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=n
+CONFIG_XNU_OWNER_ROOT_AUDIT=n
+CONFIG_XNU_OWNER_ROOT_TRUST=n
+CONFIG_XNU_OWNER_CACHE_MOUNT=n
+CONFIG_XNU_OWNER_CACHE_STARTUP=n
+CONFIG_XNU_OWNER_BOOT_MANIFEST=n
+CONFIG_XNU_OWNER_DATA_MOUNT=n
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
+CONFIG_XNU_OWNER_CRYPTEX_FILES=n
+CONFIG_XNU_SHENG_PMGR=y
+CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n
+CONFIG_XNU_ARMVIRT_PLATFORM=n
