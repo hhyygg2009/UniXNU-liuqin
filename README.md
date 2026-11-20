@@ -71,7 +71,12 @@ v43 **未上机**，结论全部来自主机侧：生产构建、62 项进像反
 （补丁互相重叠，第二遍既不能 apply 也不能 reverse-check）；删掉 `.cache/xnu-work`
 或改动任一补丁才会重新套用。
 
-## 进度（截至 2026-11-19，v43）
+## 进度（截至 2026-11-20：实机到 v44，v45 是候选）
+
+**2026-11-20（全部主机侧）**：实机基准仍是 `releases/boot-liuqin-v44-no-cs-disable.img`（等照片判读，
+`releases/watch-v44-loop.sh` 在等平板）。TC 线已备好候选 `releases/boot-liuqin-v45-trust-cache-candidate.img`
+（`CONFIG_XNU_TRUST_CACHE_RUNTIME=y` + 2,554 条原厂 cdhash 进 payload，21 项静态守卫全过、旧分支守卫恰好挂 8 项）。
+机制、证据、判读表：`docs/trust-cache-plan.md`。**v45 跑通不能替 v44 作证**（两条分支互斥编译）。
 
 打通的：全链路 Linux 构建与实机 `fastboot boot`（不写分区）；UFS 控制器/SMMU/根窗口读取；
 userdata 挂载与非密封根策略（v34b/c/d）；panic 上屏（v35，`--panic-only`）；

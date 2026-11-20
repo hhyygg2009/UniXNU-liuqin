@@ -59,6 +59,24 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   早 16 个启动阶段。一条命令就看清：`strings -a kernel.macho | grep "can't has"`——全镜像只有
   这一条，而 `amfi_get_out_of_my_way` 没有任何 fatal 检查，所以它留、`cs_enforcement_disable` 撤。
   audit 的 `Y-` 段把这件事变成了静态守卫（参数不在 payload 里 + 那条串恰好 1 次 + 无辜那条 0 次）。
+  还有个坑：XNU 把站点**烤进字面量**，镜像里存的是 `"message @%s:%d"`，所以按串找要搜**前缀**、
+  别带 `\0`（`check-trust-cache-image.py` 的 `P` 组起初五项全 0，就是栽在这儿）。
+- **驱动子模块的 `origin` 必须是官方仓 `https://github.com/UniXNU/ShengUfs.git`。** `unixnu tree` 只有在
+  `components.official_alias()` 认这个身份时才创建 legacy 别名 `drivers/NativeUfs`（和
+  `build/native-ufs/libNativeUfs.a` 兼容链），而 `board.toml` 的 `[kernel].archives` 写的正是
+  `build-arm-driver.py NativeUfs`。把 origin 指到 fork（`Fly116/ShengUfs` 或 `hhyygg2009/ShengUfs`）之后，
+  报错在整整一层抽象之外：`clang-24: error: no such file or directory:
+  .../out/liuqin/tree/drivers/NativeUfs/NativeUfs.cpp`（2026-11-19 22:44 试 `test-pr1` 就是这么把构建弄死的）。
+  fork 留成 remote `mine`、维护者留成 `fly116`，`.gitmodules` 继续指 fork（记录的 commit 才公开可解析）。
+  一句话自检：`./unixnu tree && ls -l out/liuqin/tree/drivers/NativeUfs`。
+- **上机前看 `out/liuqin/payload/payload.json` 的 `kernel_args`，别看镜像文件名。** `out/` 会被上一轮试验
+  留在别的配置上（2026-11-19 那一晚它就停在 `test-pr1` 的 payload，参数里连 `amfi_get_out_of_my_way` 都没有），
+  而 `releases/*.img` 才是发出去的那个。抓它的正是 `audit-h16f-image.py` 的 `Y` 段。
+- **翻一个 `CONFIG_XNU_*` 开关 = 造一个"该在的在、该没的没"互斥证明。** 做法：复制实际生效的那份 defconfig
+  （现在是 `liuqin_boot_defconfig`）→ 只翻一个开关 → 改 `board.toml` 的 `defconfig` 声明 →
+  `./unixnu defconfig <新名>`（`check-defconfig.py` 会守"声明==选定==.config"）→ 构建 →
+  `audit-h16f-image.py` **应该只挂在断言旧分支的那几项上**，其余全过。两项互斥的通过集合就是"开关真的进了镜像"
+  的证据；否则就是 H17 第二回。
 - **内核补丁是否真的进像，用反汇编证明，不要用源码 diff 证明。** 现成的一条命令：
   `python3 scripts/audit-h16f-image.py`（v44 起 **64 项**，文件名保留是因为记录里到处引用它；
   它现在同时证明**"该在的在"和"该没的没"**——清理轮次的风险不是新代码没进去，是旧代码还在里面）：
@@ -99,6 +117,8 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
 
     python3 scripts/check-defconfig.py                                # 声明/选定/.config 三者一致
     ./unixnu build kernel && python3 scripts/audit-h16f-image.py      # 生产构建 + 进像证明（64 项）
+    python3 scripts/fetch-liuqin-trust-caches.py                     # trust cache：从本地 IPSW 抽 bundle，必须命中 pin
+    python3 scripts/check-trust-cache-image.py                       # TC 线 =y 分支的 21 项守卫（K/B/L/Q/P/T/C/A）
     tests/metaclass-simtest/run.sh                                   # ALL SIM ASSERTIONS PASS（A–G）
     python3 drivers/ShengUfs/tests/check_legacy_descriptors.py \
         --output <dir> --compiler g++                                # PASS 14/14
