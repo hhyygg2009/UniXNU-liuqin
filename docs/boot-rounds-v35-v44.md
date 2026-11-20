@@ -614,3 +614,11 @@ IPSW trust cache 打进 payload + ADT `chosen/memory-map/TrustCache`）因此从
 
 拍照要什么：① `K49 → K60` 那一页（`trust_cache_lock_init` 在不在）；② `B17/B19` 到最后一屏
 （`at_mountroot` 之后走到哪）；③ 若还有 `frames=`，连 `pages=`/`free=` 一起拍全。
+
+---
+
+## 本文件的边界
+
+本文只记**上过机**的轮次（v35→v44）。v45 是尚未上机的候选（`CONFIG_XNU_TRUST_CACHE_RUNTIME=y`
+＋两份原厂 trust cache 进 payload），它的主机侧证据、改动清单与判读表在
+`docs/trust-cache-plan.md` + `releases/v45-NOTES.md`；拿到照片后再回到本文加一节。
