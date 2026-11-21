@@ -179,9 +179,16 @@ def main():
                   f'at {payload.read_bytes().find(head):#x}' if payload.is_file() else 'no payload')
     check('T  the refused argument stayed out (cs_enforcement_disable)',
           'cs_enforcement_disable=1' not in meta.get('kernel_args', ''), 'absent from kernel_args')
-    check('T  the bring-up switch is still there (one variable per round)',
-          'amfi_get_out_of_my_way=1' in meta.get('kernel_args', ''),
-          f"{len(meta.get('kernel_args', ''))} bytes of args")
+    # 2026-11-21: this expectation belongs to the older safe route (hand-initialise the
+    # trust-cache lock and tell AMFI to get out of the way). liuqin now runs the designed
+    # route -- CONFIG_XNU_TRUST_CACHE_RUNTIME=y plus the pinned bundle in the payload and the
+    # ADT TrustCache placeholder -- so the switch must be ABSENT; keeping it would hide whether
+    # the caches are really doing the work. The v65 device run is what flipped this: exec of
+    # init reached launchd and AMFI killed it with OS_REASON_EXEC / EXEC_EXIT_REASON_SECURITY_POLICY
+    # (namespace 9 code 0x8), i.e. nothing was trusted yet.
+    check('T  the bring-up switch is retired (the caches must do the work themselves)',
+          'amfi_get_out_of_my_way=1' not in meta.get('kernel_args', ''),
+          f"{len(meta.get('kernel_args', ''))} bytes of args (limit 1000)")
     adt_blob = Path(args.adt).read_bytes() if Path(args.adt).is_file() else (
         payload.read_bytes() if payload.is_file() else b'')
     props = adt_trustcache_property(adt_blob)
