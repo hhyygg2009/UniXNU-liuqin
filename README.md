@@ -398,7 +398,8 @@ if (parent != root) { IOLog("... not registry member ..."); return; }
    **已映射且可执行**的地址（函数指针）。宁可拒绝构建，也不要静默发出一个毒常量。
 
 **定位手段**（这条是本轮唯一有效的办法）：把 panic 块里的 `pc`/`lr`/`x8`/`x25`/`c0` 全部拿去
-跟 `nm -n -arch arm64 kernel.macho` 导出的符号表对（本仓 51,273 个符号，存成
+跟符号表对（工具链里的 cctools `nm -n -arch arm64`；Linux 上 `llvm-nm` 同样能读 Mach-O，
+binutils 的 `nm` 不认 `-arch`）（本仓 51,273 个符号，存成
 `build/v60-kernel.syms`），再用 `llvm-objdump -d` 看 `lr-4` 那条指令 —— `lr` 落在 `bl` 之后
 就说明崩在被调函数里，而不是在带 `lr` 的那个函数里。这一步把"卡在 IOKit"直接缩到一次生成常量的误用上。
 
@@ -668,12 +669,22 @@ strings out/liuqin/kernel/kernel.macho | grep -c "<新增的里程碑文本>"
 【合并注】本仓在第 2 步和第 3 步之间加两条，专防 §3.7 这一类"生成期中毒"：
 
 ```bash
-# 2b) 生成的绝对符号绑定是否落在合法地址范围（platform-power / ufs-bindings 同理）
-sed -n 's/^\.set \([^,]*\), \(0x[0-9a-f]*\)/\1 \2/p' \
-  out/liuqin/tree/build/sheng-platform-power/original-bindings.S \
-  | awk '{ if (and(strtonum($2), 0xfffff00000000000) != 0xfffff00000000000) print "SUSPECT:", $0 }'
-# 2c) 内核链接基址做个参照，超出即值得怀疑
-nm -n -arch arm64 out/liuqin/kernel/kernel.macho | awk '$3=="__ZTV18ShengPlatformPower"{print "vtable:", $1}'
+# 2b) 生成的绝对符号绑定是不是合法 VA（platform-power / ufs-bindings 同理）。
+#     内核地址高 16 位恒为 0xffff；被当成指针的指令字一定不是（§3.7 的实测输出如下）。
+#     注意别用 awk 的 and()/strtonum()：Debian 默认 mawk 没有这两个函数。
+python3 - out/liuqin/tree/build/sheng-platform-power/original-bindings.S <<'PY'
+import re, sys
+for line in open(sys.argv[1]):
+    m = re.match(r'\.set (\S+), (0x[0-9a-f]+)', line)
+    if m and int(m.group(2), 16) >> 48 != 0xFFFF:
+        print('SUSPECT:', m.group(1), m.group(2))
+PY
+#   SUSPECT: __ZN9ApplePMGR7readAonEv 0xd63f0100aa1503e0
+#   SUSPECT: __ZN9ApplePMGR8writeAonEy 0xf940f508f9400008
+
+# 2c) 内核链接基址 / 具体对象地址做参照（Linux 上用 llvm-nm，binutils 的 nm 不认 -arch）
+llvm-nm out/liuqin/kernel/kernel.macho | grep __ZTV18ShengPlatformPower
+#   fffffff0072091d0 S __ZTV18ShengPlatformPower   ← 本仓 v60 实测
 ```
 
 ---
