@@ -1,0 +1,223 @@
+diff --git a/drivers/ShengUfs/RootLayout.h b/drivers/ShengUfs/RootLayout.h
+--- a/drivers/ShengUfs/RootLayout.h
++++ b/drivers/ShengUfs/RootLayout.h
+@@ -4,13 +4,13 @@
+ // ---- LUN 0 GPT and the root-image manifest -------------------------------------------------
+ struct RootWindow {
+   char name[32];
+-  uint64_t offset;   // bytes from the start of the userdata partition
++  uint64_t offset;   // bytes from the start of the root partition
+   uint64_t size;     // bytes
+   uint8_t sha256[32];
+ };
+ 
+ struct RootLayout {
+-  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
++  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0; the root partition ("userdata" by default)
+   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
+   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
+   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
+@@ -56,8 +56,38 @@
+   return used != 0;
+ }
+ 
+-// Find the partition named "userdata" in LUN 0's primary GPT (4096-byte sectors), then read the
+-// manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
++// The GPT partition that carries the SHNGROOT directory. NativeUfs::start() overrides it from
++// the native-ufs-root-partition boot argument before any probe or root start reaches
++// findRootLayout(); without that argument the driver keeps looking in "userdata", the board
++// default (all installed layouts used to live there).
++static char gRootPartition[32] = "userdata";
++
++// Install a partition name for findRootLayout(). The value is compared against the GPT entry's
++// UTF-16LE name, so only printable ASCII that fits the 32-byte record is accepted. On refusal the
++// current name (the board default or an earlier accepted override) is kept and false is returned.
++static inline bool setRootPartition (const char *name)
++{
++  if (!name) {
++    return false;
++  }
++  size_t length = 0;
++  while (length < sizeof (gRootPartition) - 1 && name[length]) {
++    if (name[length] < 0x20 || name[length] > 0x7e) {
++      return false;
++    }
++    length++;
++  }
++  if (!length || name[length]) {
++    return false;
++  }
++  bzero (gRootPartition, sizeof (gRootPartition));
++  memcpy (gRootPartition, name, length);
++  return true;
++}
++
++// Find the root partition (gRootPartition: "userdata" unless native-ufs-root-partition named
++// another GPT entry) in LUN 0's primary GPT (4096-byte sectors), then read the manifest at its
++// first block. Read-only. Returns false only if the GPT itself is unusable.
+ static bool findRootLayout (RootLayout *layout, const char **why)
+ {
+   gRootDiagnostic.stage = "GPT header";
+@@ -105,7 +135,11 @@
+     *why = "GPT entries CRC";
+     return false;
+   }
+-  static const char wanted[] = "userdata";
++  const char *wanted = gRootPartition;
++  unsigned wantedLength = 0;
++  while (wanted[wantedLength]) {
++    wantedLength++;
++  }
+   bool found = false;
+   for (uint32_t index = 0; index < count; index++) {
+     const uint8_t *entry = gScratch + index * 128;
+@@ -123,15 +157,20 @@
+       }
+     }
+     bool match = true;
+-    for (unsigned c = 0; c < sizeof (wanted); c++) {
++    for (unsigned c = 0; c < wantedLength; c++) {
+       if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
+         match = false;
+         break;
+       }
+     }
++    // The GPT name is NUL terminated UTF-16LE: the character after the wanted name must be the
++    // empty one, otherwise "userdata" would also match a longer name such as "userdata2".
++    if (match && (entry[56 + 2 * wantedLength] || entry[57 + 2 * wantedLength])) {
++      match = false;
++    }
+     if (match) {
+       if (found) {
+-        *why = "duplicate userdata partition";
++        *why = "duplicate root partition";
+         return false;
+       }
+       layout->userdataFirst = le64 (entry + 32);
+@@ -140,7 +179,7 @@
+     }
+   }
+   if (!found || layout->userdataLast < layout->userdataFirst) {
+-    *why = "no userdata partition";
++    *why = "no root partition";
+     return false;
+   }
+   gRootDiagnostic.first = layout->userdataFirst;
+@@ -148,7 +187,7 @@
+   gRootDiagnostic.stage = "root manifest";
+   // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
+   if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
+-    *why = "userdata first block read";
++    *why = "root partition first block read";
+     return false;
+   }
+   layout->magic0 = le32 (gScratch);
+diff --git a/drivers/ShengUfs/NativeUfs.cpp b/drivers/ShengUfs/NativeUfs.cpp
+--- a/drivers/ShengUfs/NativeUfs.cpp
++++ b/drivers/ShengUfs/NativeUfs.cpp
+@@ -3113,6 +3113,19 @@
+   unsigned probe = 0, rootMode = 0;
+   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
+   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
++  // The SHNGROOT directory normally lives in the "userdata" GPT partition. A bring-up layout
++  // can name another entry (native-ufs-root-partition=linux_root) so the root image is installed
++  // and read from a partition the board actually has. Parsed once here, before any probe or
++  // startRoot call reaches findRootLayout().
++  char rootPartition[32] = {};
++  if (PE_parse_boot_argn ("native-ufs-root-partition", rootPartition, sizeof (rootPartition))) {
++    if (!setRootPartition (rootPartition)) {
++      IOLog ("NativeUfs: native-ufs-root-partition \"%s\" is not a usable GPT name; keeping %s\n",
++             rootPartition, gRootPartition);
++    } else {
++      IOLog ("NativeUfs: root partition is %s\n", gRootPartition);
++    }
++  }
+   native_ufs_probe_requested = probe != 0;
+   liuqin_milestone ("U", probe ? "start-probe" : (rootMode ? "start-root" : "start-none"));
+   // Default: match for observability only, never touch the controller. Hardware work runs once,
+@@ -3140,7 +3153,7 @@
+     adoptAndRead (probe);
+   }
+   if (probe == 10) {
+-    // Read-only check before anything is flashed: LUN 0 GPT -> "userdata" -> its first block.
++    // Read-only check before anything is flashed: LUN 0 GPT -> the root partition -> its first block.
+     const char *why = "";
+     if (!hostBringUp (&why)) {
+       lqPanic ("NATIVE_UFS root check: bring-up failed: %s", why);
+@@ -3188,6 +3201,76 @@
+            layout->window[1].name, layout->window[1].offset, layout->window[1].size, sig[1][0], sig[1][1], seen[1],
+            be32w (layout->window[0].sha256), be32w (layout->window[0].sha256 + 4), be32w (layout->window[0].sha256 + 8), be32w (layout->window[0].sha256 + 12),
+            be32w (layout->window[1].sha256), be32w (layout->window[1].sha256 + 4), be32w (layout->window[1].sha256 + 8), be32w (layout->window[1].sha256 + 12));
++  }
++  if (probe == 15) {
++    // Read-only GPT dump of LUN 0 (4096-byte sectors): every used entry with its name and
++    // first/last LBA, at most 40 entries. This is how the install plan is checked against the
++    // partition table the device actually has before any write; nothing is written here.
++    const char *why = "";
++    if (!hostBringUp (&why)) {
++      lqPanic ("NATIVE_UFS gpt dump: bring-up failed: %s", why);
++    }
++    if (hostRead4k (0, 1, 1, gScratch) != kIOReturnSuccess) {
++      lqPanic ("NATIVE_UFS gpt dump: header read failed");
++    }
++    uint32_t sig0 = le32 (gScratch), sig1 = le32 (gScratch + 4);
++    uint32_t headerBytes = le32 (gScratch + 12), headerCrc = le32 (gScratch + 16);
++    uint32_t entriesCrc = le32 (gScratch + 88), count = le32 (gScratch + 80);
++    uint32_t entrySize = le32 (gScratch + 84);
++    uint64_t headerLba = le64 (gScratch + 24), backupLba = le64 (gScratch + 32);
++    uint64_t firstUsable = le64 (gScratch + 40), lastUsable = le64 (gScratch + 48);
++    uint64_t entriesLba = le64 (gScratch + 72);
++    if (sig0 != 0x20494645U || sig1 != 0x54524150U || entrySize != 128 || headerBytes < 92 ||
++        headerBytes > 4096 || !count || count > 128 || entriesLba < 2 || entriesLba > 64) {
++      lqPanic ("NATIVE_UFS gpt dump: unexpected header sig=%08x %08x esz=%u cnt=%u elba=%llx",
++             sig0, sig1, entrySize, count, entriesLba);
++    }
++    bool headerCrcOk = rootCrc32 (gScratch, headerBytes, true) == headerCrc;
++    uint32_t blocks = (count * 128 + 4095) / 4096;
++    if (hostRead4k (0, entriesLba, blocks, gScratch) != kIOReturnSuccess) {
++      lqPanic ("NATIVE_UFS gpt dump: entries read failed elba=%llx blocks=%u", entriesLba, blocks);
++    }
++    bool entriesCrcOk = rootCrc32 (gScratch, count * 128) == entriesCrc;
++    static char text[4096];
++    int used = snprintf (text, sizeof (text),
++                         "NATIVE_UFS gpt dump LUN0\n"
++                         "hdr=%llx backup=%llx usable=%llx..%llx elba=%llx cnt=%u crc %s/%s\n",
++                         headerLba, backupLba, firstUsable, lastUsable, entriesLba, count,
++                         headerCrcOk ? "ok" : "bad", entriesCrcOk ? "ok" : "bad");
++    unsigned listed = 0;
++    for (uint32_t index = 0; index < count && listed < 40; index++) {
++      const uint8_t *entry = gScratch + index * 128;
++      if (!rootEntryUsed (entry)) {
++        continue;
++      }
++      if (used > int (sizeof (text)) - 128) {
++        break;
++      }
++      char name[37];
++      unsigned length = 0;
++      while (length < 36) {
++        uint8_t lo = entry[56 + 2 * length], hi = entry[57 + 2 * length];
++        if (!lo && !hi) {
++          break;
++        }
++        name[length] = (hi == 0 && lo >= 0x20 && lo <= 0x7e) ? char (lo) : '?';
++        length++;
++      }
++      name[length] = 0;
++      uint64_t first = le64 (entry + 32), last = le64 (entry + 40);
++      used += snprintf (text + used, sizeof (text) - used, "%u:%s %llx-%llx %lluM%s",
++                        index, name, first, last,
++                        first <= last ? ((last - first + 1) * 4096ULL) >> 20 : 0ULL,
++                        (++listed % 2) ? "  " : "\n");
++    }
++    snprintf (text + used, sizeof (text) - used, "\nlisted=%u/%u", listed, count);
++    // lqPanic() formats into a 512-byte line, so a full GPT list has to go through the console
++    // mirror directly; the panic that closes the probe then carries the summary.
++    if (used < 480) {
++      lqPanic ("%s", text);
++    }
++    liuqin_debug_puts (text);
++    lqPanic ("NATIVE_UFS gpt dump: %u of %u entries listed above", listed, count);
+   }
+   if (probe == 14) {
+     // Immediate memory snapshot at root-device start, before the userspace that triggers jetsam.

@@ -1,0 +1,163 @@
+diff --git a/NativeUfs.cpp b/NativeUfs.cpp
+index 2b164e0..2dbef87 100644
+--- a/NativeUfs.cpp
++++ b/NativeUfs.cpp
+@@ -75,11 +75,19 @@ volatile uint32_t native_ufs_root_step = 0;
+ // board that made native-ufs-root=1 a guaranteed dead end. The bypass opens only with the
+ // explicit boot arg native-ufs-unauth-root=1 and is recorded here for the console report.
+ volatile uint32_t native_ufs_unauth_root = 0;
++#if !defined(NATIVE_VERIFIED_BLOCK) || !NATIVE_VERIFIED_BLOCK
++// Only the unverified publication path asks this question; in a verified build the
++// branch below is compiled out and the helper would be an unused static function.
++#if !defined(NATIVE_VERIFIED_BLOCK) || !NATIVE_VERIFIED_BLOCK
++// Only the unverified publication path asks this question; in a verified build the
++// branch below is compiled out and the helper would be an unused static function.
+ static bool rootUnauthGateOpen ()
+ {
+   unsigned unauth = 0;
+   return PE_parse_boot_argn ("native-ufs-unauth-root", &unauth, sizeof (unauth)) && unauth == 1;
+ }
++#endif
++#endif
+ const char *volatile native_ufs_root_failure = nullptr;
+ volatile uint32_t native_ufs_cap = 0;
+ volatile uint32_t native_ufs_version = 0;
+@@ -1279,6 +1287,7 @@ static bool hostBringUp (const char **why)
+     return true;
+   }
+   gRootDiagnostic.stage = "controller map";
++  liuqin_milestone ("U", "h:controller map");
+   gHost.hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, gHost.hcMap);
+   if (!gHost.hc) {
+     *why = "controller map";
+@@ -1291,26 +1300,35 @@ static bool hostBringUp (const char **why)
+     gRootDiagnostic.hce = read32 (gHost.hc, 0x34);
+   }
+   gRootDiagnostic.stage = "DMA allocation";
++  liuqin_milestone ("U", "h:DMA allocation");
+   // All kSlots command slots when the region is physically contiguous and addressable, else slot 0's original layout alone. The
+   // request list must also have entries for them (CAP.NUTRS, entries 0, 2, ...).
+   const bool wide = read32 (gHost.hc, 0) & 0x01000000;
+   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
+   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
++  liuqin_milestone ("U", "h:lock");
+   gHost.lock = IOLockAlloc ();
++  liuqin_milestone ("U", "h:lock-ok");
+   // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
+-  const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
+-  const unsigned counts[3] = { kRegionSlots, 8, 1 };
++  // liuqin: the 1 MiB physically-contiguous request blocks inside
++  // IOBufferMemoryDescriptor::inTaskWithOptions on this kernel. Start from the
++  // smallest region the transport accepts (one slot) and grow only if it works.
++  const uint32_t sizes[3] = { uint32_t (kDmaBytesOneSlot), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytes) };
++  const unsigned counts[3] = { 1, 8, kRegionSlots };
+   for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
+     const uint32_t bytes = sizes[attempt];
+     if (counts[attempt] > slots && counts[attempt] > 1) continue;
++    liuqin_milestone ("U", counts[attempt] == 1 ? "h:alloc1" : counts[attempt] == 8 ? "h:alloc8" : "h:allocN");
+     IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
+       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+       static_cast<IOOptionBits> (kIOMemoryMapperNone),
+       bytes, 4096);
+     if (!dma) continue;
++    liuqin_milestone ("U", "h:alloc-ok");
+     uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
+     IOByteCount contiguous = 0;
+     uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
++    liuqin_milestone ("U", "h:phys");
+     gRootDiagnostic.dma = phys;
+     gRootDiagnostic.contiguous = contiguous;
+     if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
+@@ -1319,19 +1337,26 @@ static bool hostBringUp (const char **why)
+     }
+     gHost.dma = dma; gHost.virt = virt; gHost.phys = phys; gHost.dmaBytes = bytes;
+   }
++  liuqin_milestone ("U", "h:dma-done");
+   if (!gHost.virt || !gHost.lock) {
+     *why = !gHost.lock ? "dma buffer" : "DMA address/contiguity";
+     return false;
+   }
+   const unsigned regionSlots = gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
+   hostSlotGeometryRegionA (regionSlots);
++  liuqin_milestone ("U", "h:geom");
+   hostSlotsInit (regionSlots, gHost.lock);
++  liuqin_milestone ("U", "h:slots");
+   native_ufs_slots = gSlotCount;
+   bzero (gHost.virt, gHost.dmaBytes);
+   cacheCivac (gHost.virt, gHost.dmaBytes);
++  liuqin_milestone ("U", "h:civac");
+   uint32_t report[3] = { 0, 0, 0 };
+   gRootDiagnostic.stage = "SMMU and request list";
++  liuqin_milestone ("U", "h:SMMU and request list");
++  liuqin_milestone ("U", "h:stopq");
+   if (!hostStopQueue (why)) return false;
++  liuqin_milestone ("U", "h:stopq-ok");
+   smmuBypassStream (UFS_SMMU_STREAM_ID, gHost.smmuMap, report, gHost.phys, gHost.dmaBytes);
+   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
+   // The board's WiFi endpoint (wifi=2 or more) needs a pass-through stream of its own, set up here with the same code and at the same moment as the
+@@ -1481,6 +1506,7 @@ static bool hostBringUp (const char **why)
+   hostSlotsUpgrade (regionSlots, entries, wide);
+   if (!hostStartQueue (why)) return false;
+   gRootDiagnostic.stage = "NOP OUT";
++  liuqin_milestone ("U", "h:NOP OUT");
+   // NOP OUT proves the transport before touching the SCSI layer.
+   if (hostNop () != kIOReturnSuccess) {
+     gHost.ready = false;
+@@ -1489,6 +1515,7 @@ static bool hostBringUp (const char **why)
+   }
+   uint32_t power = 0;
+   gRootDiagnostic.stage = "power mode query";
++  liuqin_milestone ("U", "h:power mode query");
+   if (hostQueryRead (0x03, 0x02, &power) != kIOReturnSuccess) {
+     gHost.ready = false;
+     *why = "power mode query";
+@@ -1497,6 +1524,7 @@ static bool hostBringUp (const char **why)
+   gRootDiagnostic.power = power;
+   if ((power & 0xff) != 0x11) {
+     gRootDiagnostic.stage = "device wake";
++    liuqin_milestone ("U", "h:device wake");
+     // START STOP UNIT, power condition ACTIVE, to the UFS Device well-known LU (as Linux resumes).
+     uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+     uint32_t scsi = 0;
+@@ -1508,6 +1536,7 @@ static bool hostBringUp (const char **why)
+     IOSleep (50);
+   }
+   gRootDiagnostic.stage = "LUN ready";
++  liuqin_milestone ("U", "h:LUN ready");
+   for (unsigned attempt = 0; attempt < 20; attempt++) {
+     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
+     uint32_t scsi = 0;
+@@ -3107,12 +3136,15 @@ bool NativeUfs::start (IOService *provider)
+ bool NativeUfs::startRoot (IOService *provider)
+ {
+   const char *why = "";
++  liuqin_milestone ("U", "r0-enter");
+   native_ufs_root_step = 1;
+   // liuqin (H16-F, v39): the class object was built at boot and its superClassLink was
+   // scribbled before postModLoad's ancestor walk. Repair it here, before the first
+   // NativeUfsBlock exists, then prove the chain walkable. Nothing is refused for a name
+   // the family legitimately owns -- v36's gate was the false positive (H16-E).
+   const OSMetaClass *base = liuqinBlockSuperClass ();
++  liuqin_milestone ("U", "r1-base");
++  liuqin_milestone ("U", "r1-base");
+   if (!base) {
+     liuqin_milestone ("U", "base-missing");
+     rootDiagnosticFailure ("IOBlockStorageDevice metaclass is not registered");
+@@ -3127,7 +3159,9 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   gBlockSuperClass = base;
++  liuqin_milestone ("U", "r2-abi");
+   liuqinBlockAdoptSuperClass (base, "pre");
++  liuqin_milestone ("U", "r3-adopt");
+   if (!liuqinBlockChainOk (NativeUfsBlock::metaClass)) {
+     liuqin_milestone ("U", "chain");
+     rootDiagnosticFailure ("NativeUfsBlock metaclass chain is still unwalkable");
+@@ -3135,6 +3169,7 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "meta-ok");
++  liuqin_milestone ("U", "r4-host");
+   if (!hostBringUp (&why)) {
+     liuqin_milestone ("U", "root-bringup-fail");
+     rootDiagnosticFailure (why);

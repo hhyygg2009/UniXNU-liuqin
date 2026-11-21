@@ -1,0 +1,236 @@
+diff --git a/drivers/ShengUfs/RootLayout.h b/drivers/ShengUfs/RootLayout.h
+--- a/drivers/ShengUfs/RootLayout.h
++++ b/drivers/ShengUfs/RootLayout.h
+@@ -11,6 +11,7 @@
+ 
+ struct RootLayout {
+   uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0; the root partition ("userdata" by default)
++  uint64_t rootBaseLba;                   // 4096-byte LBA the manifest is read from: userdataFirst + root offset/4096
+   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
+   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
+   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
+@@ -85,9 +86,28 @@
+   return true;
+ }
+ 
++// A root image may be placed at a byte offset inside the root partition (boot argument
++// native-ufs-root-offset, typically the tail left after shrinking the Android f2fs). Only a
++// 4096-byte aligned offset is meaningful: the manifest base LBA moves by offset/4096, while
++// userdataFirst/userdataLast stay the GPT entry's own bounds (reporting, and the store/log
++// windows anchored at the end of the partition).
++static uint64_t gRootOffsetBytes = 0;
++
++// Install the in-partition byte offset. The caller records it for findRootLayout(); only the
++// 4096-byte block alignment is checked here, and on refusal the previous value is kept.
++static inline bool setRootOffset (uint64_t bytes)
++{
++  if (bytes & 4095) {
++    return false;
++  }
++  gRootOffsetBytes = bytes;
++  return true;
++}
++
+ // Find the root partition (gRootPartition: "userdata" unless native-ufs-root-partition named
+-// another GPT entry) in LUN 0's primary GPT (4096-byte sectors), then read the manifest at its
+-// first block. Read-only. Returns false only if the GPT itself is unusable.
++// another GPT entry) in LUN 0's primary GPT (4096-byte sectors), then read the manifest at the
++// partition's first block plus gRootOffsetBytes. Read-only. Returns false only if the GPT itself
++// is unusable.
+ static bool findRootLayout (RootLayout *layout, const char **why)
+ {
+   gRootDiagnostic.stage = "GPT header";
+@@ -182,12 +202,18 @@
+     *why = "no root partition";
+     return false;
+   }
++  layout->rootBaseLba = layout->userdataFirst + gRootOffsetBytes / 4096;
++  if (layout->rootBaseLba > layout->userdataLast) {
++    *why = "root offset outside the root partition";
++    return false;
++  }
+   gRootDiagnostic.first = layout->userdataFirst;
+   gRootDiagnostic.last = layout->userdataLast;
+   gRootDiagnostic.stage = "root manifest";
+-  // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
+-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
+-    *why = "root partition first block read";
++  // The manifest block: the partition's first block for an in-place image, or the configured
++  // offset inside it for an image placed in the tail (rootBaseLba). Read-only either way.
++  if (hostRead4k (0, layout->rootBaseLba, 1, gScratch) != kIOReturnSuccess) {
++    *why = "root manifest block read";
+     return false;
+   }
+   layout->magic0 = le32 (gScratch);
+@@ -209,7 +235,8 @@
+       SHA256_Final (digest, &context);
+       layout->manifestStatus = 3;
+       if (memcmp (digest, gScratch + 4064, 32) == 0) {
+-        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
++        // Bounds are measured from the manifest base, so an offset image cannot reach past the GPT end.
++        uint64_t partitionBytes = (layout->userdataLast + 1 - layout->rootBaseLba) * 4096ULL;
+         layout->manifestStatus = 4;
+         bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes;
+         for (uint32_t index = 0; index < n && bounds; index++) {
+diff --git a/drivers/ShengUfs/NativeUfs.cpp b/drivers/ShengUfs/NativeUfs.cpp
+--- a/drivers/ShengUfs/NativeUfs.cpp
++++ b/drivers/ShengUfs/NativeUfs.cpp
+@@ -1672,7 +1672,7 @@
+ namespace {
+ struct StoreGeometry {
+   bool valid;
+-  uint64_t first, last, imageBytes, entriesLba;
++  uint64_t first, last, rootFirst, imageBytes, entriesLba;   // rootFirst: manifest base LBA (first + root offset)
+   uint32_t headerCrc, entriesCrc, entryCount;
+ };
+ StoreGeometry gStoreGeometry;
+@@ -1722,7 +1722,9 @@
+   else if (gStoreRegionBlocks) reason = "already open";
+   else {
+     uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
++    // The flashed root image starts at rootFirst (partition first LBA + root offset); the store still
++    // ends below the reserve at the end of the partition.
++    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096 + (gStoreGeometry.rootFirst - gStoreGeometry.first);
+     const uint64_t reserve = reserveBlocks ();
+     if (!blocks || reserve >= partition || blocks > partition - reserve) reason = "size";
+     else if (partition - blocks - reserve < imageBlocks + 1024) reason = "overlaps the root image";
+@@ -1951,7 +1953,8 @@
+   else if (gLogRegionBlocks) reason = "already open";
+   else {
+     uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
++    // The log also stays clear of the root image, which starts at rootFirst (partition first + offset).
++    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096 + (gStoreGeometry.rootFirst - gStoreGeometry.first);
+     if (reserveBlocks () < kLogReserveBlocks + kExportBlocks) reason = "reserve too small for the log";
+     else if (partition - reserveBlocks () < imageBlocks + 1024) reason = "overlaps the root image";
+     else {
+@@ -3126,6 +3129,19 @@
+       IOLog ("NativeUfs: root partition is %s\n", gRootPartition);
+     }
+   }
++  // The root image may sit at a byte offset inside the root partition (typically the tail left
++  // after shrinking the Android f2fs). Every probe and startRoot reads findRootLayout()'s
++  // rootBaseLba instead of the partition start; an unaligned value is refused and 0 stays in use.
++  uint64_t rootOffset = 0;
++  if (PE_parse_boot_argn ("native-ufs-root-offset", &rootOffset, sizeof (rootOffset))) {
++    if (!setRootOffset (rootOffset)) {
++      setRootOffset (0);
++      IOLog ("NativeUfs: native-ufs-root-offset %llu is not 4096-byte aligned; using 0\n", rootOffset);
++    } else {
++      IOLog ("NativeUfs: root offset is %llu bytes (%llu blocks into %s)\n",
++             gRootOffsetBytes, gRootOffsetBytes / 4096, gRootPartition);
++    }
++  }
+   native_ufs_probe_requested = probe != 0;
+   liuqin_milestone ("U", probe ? "start-probe" : (rootMode ? "start-root" : "start-none"));
+   // Default: match for observability only, never touch the controller. Hardware work runs once,
+@@ -3163,10 +3179,11 @@
+       lqPanic ("NATIVE_UFS root check: %s", why);
+     }
+     lqPanic ("NATIVE_UFS root check\n"
+-           "userdata first=%llx last=%llx\n"
++           "userdata first=%llx last=%llx root base=%llx offset=%llu\n"
+            "block0 magic %08x %08x ext4magic=%04x ext4blocks=%u\n"
+            "manifest status=%u windows=%u",
+-           layout->userdataFirst, layout->userdataLast, layout->magic0, layout->magic1,
++           layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, gRootOffsetBytes,
++           layout->magic0, layout->magic1,
+            layout->ext4Magic, layout->ext4Blocks, layout->manifestStatus, layout->windows);
+   }
+   if (probe == 11) {
+@@ -3183,7 +3200,7 @@
+     uint32_t sig[4][2] = {};
+     uint32_t seen[4] = {};
+     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = layout->rootBaseLba * 4096ULL + layout->window[index].offset;
+       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
+         seen[index] = 1;
+         sig[index][0] = le32 (gScratch + 512);
+@@ -3191,12 +3208,13 @@
+       }
+     }
+     lqPanic ("NATIVE_UFS root windows\n"
+-           "userdata first=%llx last=%llx manifest status=%u windows=%u\n"
++           "userdata first=%llx last=%llx root base=%llx offset=%llu manifest status=%u windows=%u\n"
+            "w0 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
+            "w1 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
+            "w0 sha %08x %08x %08x %08x\n"
+            "w1 sha %08x %08x %08x %08x",
+-           layout->userdataFirst, layout->userdataLast, layout->manifestStatus, layout->windows,
++           layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, gRootOffsetBytes,
++           layout->manifestStatus, layout->windows,
+            layout->window[0].name, layout->window[0].offset, layout->window[0].size, sig[0][0], sig[0][1], seen[0],
+            layout->window[1].name, layout->window[1].offset, layout->window[1].size, sig[1][0], sig[1][1], seen[1],
+            be32w (layout->window[0].sha256), be32w (layout->window[0].sha256 + 4), be32w (layout->window[0].sha256 + 8), be32w (layout->window[0].sha256 + 12),
+@@ -3263,7 +3281,37 @@
+                         first <= last ? ((last - first + 1) * 4096ULL) >> 20 : 0ULL,
+                         (++listed % 2) ? "  " : "\n");
+     }
+-    snprintf (text + used, sizeof (text) - used, "\nlisted=%u/%u", listed, count);
++    used += snprintf (text + used, sizeof (text) - used, "\nlisted=%u/%u", listed, count);
++    if (used > int (sizeof (text)) - 96) {
++      used = int (sizeof (text)) - 96;   // keep room for the root-base line on a full dump
++    }
++    // The base the root driver reads the manifest from: the GPT first LBA of the root partition
++    // plus native-ufs-root-offset. Printed with the dump so the panel report and the boot argument
++    // can be compared without another probe.
++    uint64_t rootFirst = 0;
++    bool rootFound = false;
++    for (uint32_t index = 0; index < count; index++) {
++      const uint8_t *entry = gScratch + index * 128;
++      if (!rootEntryUsed (entry)) {
++        continue;
++      }
++      unsigned matched = 0;
++      while (matched < 31 && gRootPartition[matched] &&
++             entry[56 + 2 * matched] == static_cast<uint8_t> (gRootPartition[matched]) &&
++             entry[57 + 2 * matched] == 0) {
++        matched++;
++      }
++      if (!gRootPartition[matched] && !entry[56 + 2 * matched] && !entry[57 + 2 * matched]) {
++        rootFirst = le64 (entry + 32);
++        rootFound = true;
++        break;
++      }
++    }
++    if (used < int (sizeof (text)) - 64) {
++      used += snprintf (text + used, sizeof (text) - used, "\nroot base lba=%llu offset=%llu%s",
++                        rootFound ? rootFirst + gRootOffsetBytes / 4096 : 0ULL, gRootOffsetBytes,
++                        rootFound ? "" : " (root partition not in GPT)");
++    }
+     // lqPanic() formats into a 512-byte line, so a full GPT list has to go through the console
+     // mirror directly; the panic that closes the probe then carries the summary.
+     if (used < 480) {
+@@ -3370,16 +3418,16 @@
+   native_ufs_root_step = 3;
+   if (layout->manifestStatus != 0) {
+     rootDiagnosticFailure ("root manifest rejected");
+-    IOLog ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
+-           layout->manifestStatus, layout->magic0, layout->magic1);
++    IOLog ("NativeUfs: no valid root manifest at base LBA %llu (offset %llu, status %u, magic %08x %08x)\n",
++           layout->rootBaseLba, gRootOffsetBytes, layout->manifestStatus, layout->magic0, layout->magic1);
+     IOFree (layout, sizeof (RootLayout));
+     return false;
+   }
+-  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+-                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
++  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, layout->imageBytes,
++                     layout->gptEntriesLba, layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
+   gRootObjects = layout->objects;
+   for (unsigned i = 0; i < layout->objects; ++i) gRootObject[i] = layout->object[i];
+-  gRootObjectBase = layout->userdataFirst * 4096ULL;
++  gRootObjectBase = layout->rootBaseLba * 4096ULL;
+   liuqin_milestone ("U", "root-manifest-ok");
+   const char *names[4] = {};
+   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
+@@ -3416,7 +3464,7 @@
+       gPendingDevice[index] = device;
+       gPendingAttached[index] = false;
+       gPendingUuid[index][0] = 0;
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = layout->rootBaseLba * 4096ULL + layout->window[index].offset;
+       if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
+           !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+       gRootDiagnostic.stage = "root window attachment";

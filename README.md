@@ -6,6 +6,8 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
 实机 `fastboot boot` 已反复验证（v33→v38，纯内存运行，不写分区）。
 **2026-11-17（v38）：内核第一次走完 IOKit 引导进入 BSD，一路到达挂载决策**；
 剩下的阻塞点已经在实机上钉死到具体对象、具体字段（见「进度」一节）。
+**2026-11-21：`unixnu` 分区已在实机落地并逐字节校验，构建改用 PR #1 的 v60，
+卡点前移到 `bsd_init` 之后的 platform-power（根因已定位，见「进度（2026-11-21…）」一节）。**
 板级关键数值已经从 stock 固件里核实完了，board.toml 里每个 TODO 都有明确的取值方法和当前状态。
 
     board.toml                 板级描述（userdata LBA、splash、FD 窗口已填实测值）
@@ -108,6 +110,103 @@ ABI 闸，并在注册前后各打一行 `M:reg` 快照。这样既绕开那 172
 `postModLoad+0x2d4` abort，并证明扫描只丢掉那个中毒槽**）；
 上游 descriptor oracle `drivers/ShengUfs/tests/check_legacy_descriptors.py`（14/14）。
 镜像本身放在构建机的 `releases/`（不入库，`fastboot boot` 用）。
+
+## 进度（2026-11-21，PR #1 合并 + `unixnu` 分区实机）
+
+本轮合并 Fly116 的 PR #1（v39→v60 构建链、platform-power 归档、`install-liuqin-ufs-data.py`、
+驱动指针 `26ae865`）。**README 保留本仓原版**：PR 想把 `docs/` 折进它自己的单文件 README，
+所以这个提交把本文引用的 5 篇 `docs/*.md` 连同原 README 一起留下（Fly116 版 README 与被删的
+另两篇文档仍在 `4fc7f56` 里可查）。
+
+下面的结论全部取自**实体机**：23046RP50C / liuqin，序列号 19562650，V14.0.9.0.TMYCNXM，
+活动槽 `_b`，`verifiedbootstate=orange`（已解锁）。
+
+### 1. §5 / B1 分区改造：已落地并逐字节校验
+
+userdata 从 105.79 GiB 缩到 94 GiB，尾部腾出一个 raw 分区 `unixnu` 放 iOS 根镜像 —— 必须另开
+分区，因为 Android 的 `/data` 是 f2fs over dm-default-key，XNU 读不到明文。
+
+| 项 | 值 |
+|---|---|
+| 磁盘 | 124,893,790,208 B = 30,491,648 个 4096 B LBA |
+| `userdata`（条目 34） | `2758144..27399679` = 100,931,731,456 B（94 GiB；原 `2758144..30491642`） |
+| `unixnu`（条目 35，新增） | `27399680..30491642` = 12,664,680,448 B（11.7949 GiB） |
+| SHNGROOT manifest base | LBA 27399680 = `0x1A21600`，根镜像之后余量 3,282,022,400 B |
+| 启动参数 | `native-ufs-root=1 native-ufs-root-partition=unixnu`（cmdline 961 B / 上限 1000 B） |
+
+设备侧校验（TWRP 里的 adbd，root）：`/dev/block/by-name/unixnu -> sda36`；首块 magic
+`SHNGROOT`，sha256 `bc908a6c…` == host 的 `manifest_sha256`；OS / OS-mid / SystemOS / tail
+四个 64 MiB 抽检区与 host 产物逐个一致；`userdata` 首块已清零。**LBA 0（protective MBR）全程未写。**
+
+GPT 实况和教科书不一样，记一笔免得下次照抄：条目数组是 **64 项 = 2 个 LBA**（不是 128 项 = 4
+LBA），备份数组 `30491643..44` 与备份头 `30491647` 之间还有 **2 个 pad LBA**（`30491645..46`）。
+按"128 项 + 紧邻"的假设写备份区会直接毁掉磁盘尾部，所以写盘窗口必须由**抓到的备份头**反推，
+pad 原样保留。改分区的 `carve-unixnu-gpt.py`（含 `selftest`，模拟盘回归覆盖了这两处）与回滚集
+`backup/live-20261120-2145/ROLLBACK-gpt-{primary,backup}.bin` 在构建机的项目目录里，未入库。
+
+前置条件：§5 的 dd 需要 root，而 `fastboot boot recovery.img` 在这块板上做不到（TWRP 镜像
+`kernel_size=0`），只能 `fastboot flash recovery_b`（`recovery_a` 报 `partition size: 0`）。
+**副作用：`recovery_b` 现在不是 stock**，stock 的 `recovery.img` 在 V14.0.9.0 的 fastboot 包里，
+刷回去即可。`/data` 是按方案擦掉的，首次进 Android 会在 94 GiB 上重建。
+
+### 2. 全量 Fly116 树构建：通过
+
+设备树 `ed74857` + 驱动 `26ae865`（内容 v60）。产物 `boot-liuqin-fly116-v60.img`
+69,525,504 B（sha256 `2c2255c0…`），`kernel.macho` sha256 `64d79963…`，`fastboot boot`
+纯内存运行。两处必要偏差：
+
+- **D1** — builder 不会自动跑 `patches/xnu/manual/`，手工 XNU 补丁（waiting-thread dump +
+  IOResources notify）必须显式执行，否则链接缺 `_liuqin_dump_waiting_threads`；
+- **D2** — 那个补丁插的 `#include <kern/thread_kernel_state.h>` 要删掉：这个头的 `#ifndef`
+  后面**没有配对的 `#define`**（29 / 46 行，与上游 `feeds/xnu-0b4b910d` 逐字节相同，不是补丁
+  改的），而 struct 已经由 `kern/thread.h → arm/thread.h` 进来了，于是
+  `redefinition of 'thread_kernel_state'`。
+
+内核标记核对：`native-ufs-root-partition` 2、`gLatePublishGate` 2、`startDeferredMatches` 2、
+`liuqin_dump_waiting_threads` 2、`liuqin_iokit_job_counts` 2、`IORegistryIterator` 104。
+
+### 3. 卡点前移到 `bsd_init` 之后的 platform-power，根因已钉死
+
+第一轮（v43 驱动）报 `root manifest rejected` **不是分区失败**：那个驱动把根分区名硬编码成
+`"userdata"`，读的就是刚被擦掉的 userdata（构建出的内核里 `native-ufs-root-partition` 出现
+0 次）。v60 才真正解析这个启动参数。
+
+v60 面板，逐地址用 `nm -n -arch arm64` 导出的 51,273 个符号对上：
+
+```
+M:stalled post h=0xfffffff567d58600 cnt=1 c0=0xfffffff007ae37f0 = __ZN18ShengPlatformPower10gMetaClassE
+Kernel instruction fetch abort at pc 0x003f0100aa1503e0, lr 0xfffffff0079eb28c
+  lr  = _sheng_pmgr_run+0x364，而 lr-4 处正是 `bl _sheng_original_pmgr_nub_read`
+  x25 = _sheng_pmgr_observation（精确）      x8 = __ZTV18ShengPlatformPower+0x10（vtable）
+```
+
+坏 `pc` 逐位等于 `build/sheng-platform-power/original-bindings.S` 里生成的常量：
+
+    .set __ZN9ApplePMGR7readAonEv,  0xd63f0100aa1503e0
+    .set __ZN9ApplePMGR8writeAonEy, 0xf940f508f9400008
+
+这两个值**不是地址，是指令字**（`mov x0,x21` / `blr x8`，`ldr x8,[x0]` / `ldr x8,[x8,#0x1f8]`），
+被当成 `ApplePMGR::readAon` / `writeAon` 的函数指针写进了 `__ZTV18ShengPlatformPower`，
+虚调用就跳到代码页上当数据取指。来源在 `scripts/build-sheng-platform-power.py`：
+
+- 正常 reference 是 `build/xnu-prelink/*-candidate.macho`，只有先前跑过一次原生构建才有；
+  `71c6278` 加了回落：改用 `out/ipsw/<build>/kernelcache.decompressed`（本机 `21H461`）；
+- AON 槽位取值是 `bindings[name] = ptr(0xfffffff005ce26d8 + slot*8)`。**这个常量在
+  "cache VA + slide" 空间里**，而回落镜像是**未滑动**的原始 cache，读位置整体差了 16 MiB，
+  落进 `__PLK_TEXT_EXEC`（prot=0x5）：在 21H461 里 `0xfffffff005ce30d8` 的 8 字节正是
+  `e0 03 15 aa 00 01 3f d6`；
+- 读位置补上板级 slide（`+0x1000000` → `0xfffffff006ce30d8`）就落在 `__PLK_DATA_CONST`，
+  读出 `0xfffffff005a20fbc` / `0xfffffff005a20fc4`：两者都在 `__PLK_TEXT_EXEC`，首字分别是
+  `mov w0,#0` 和 `ret`，且互相相邻 8 字节 —— 真 vtable 该有的样子。
+
+同一个坑他在 v50 已经为 IOStorageFamily 修过：`build-liuqin-ufs-bindings.py` 会读
+`board.toml` 的 `slide`，`slide == 0` 直接 `fail('refuse to bind raw cache VAs')`，再逐指针
+`+slide`；`build-sheng-platform-power.py` **一处 slide 处理都没有**，而它那些 `require()` 只校验
+符号名和槽位形状，从不校验取到的值像不像地址，所以坏常量一路通过 `build-report.json` 进了链接。
+
+**下一步（本轮未做）**：给 platform-power 的绑定补 slide，或加一道"binding 必须落在参考镜像
+可执行段内"的校验，或在缺 candidate 时直接拒绝构建；然后重跑 v60 才能重新判断根挂载。
+根挂载与 userland 至今仍未达成 —— 与本节开头那两条实机结论不冲突。
 
 ## 致谢 / Acknowledgments
 

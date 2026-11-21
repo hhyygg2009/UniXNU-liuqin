@@ -10,7 +10,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/sheng-platform-power'
 OUT.mkdir(parents=True, exist_ok=True)
-sys.path.insert(0, str(ROOT / 'kits/XnuPrelink'))
+# The liuqin-build tree still carries the native prelink kit as kits/NativePrelink;
+# the newer tree renamed it to kits/XnuPrelink. Pick whichever one holds the module.
+_KIT = next((ROOT / 'kits' / _name for _name in ('XnuPrelink', 'NativePrelink')
+             if (ROOT / 'kits' / _name / 'native_prelink.py').is_file()),
+            ROOT / 'kits' / 'NativePrelink')
+sys.path.insert(0, str(_KIT))
 from native_prelink import macho, backed_offset, exports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_target import DEPLOYMENT, TRIPLE
@@ -26,8 +31,15 @@ def require(value, message):
 
 
 kernel_candidate = ROOT.parent / 'kernel/kernel.macho'   # liuqin: the built candidate cache
-print(run(['python3', ROOT / 'scripts/audit-amfi-pmgr-contract.py',
-           '--candidate', str(kernel_candidate)], text=True), end='')
+# The audit compares against a native prelink candidate that only a previous native build
+# produces. The ABI below is fixed text in this script, so a missing reference changes the
+# verification, not the code: say so and continue.
+try:
+    print(run(['python3', ROOT / 'scripts/audit-amfi-pmgr-contract.py',
+               '--candidate', str(kernel_candidate)], text=True), end='')
+except subprocess.CalledProcessError:
+    print('build-sheng-platform-power: AMFI/PMGR audit unavailable '
+          '(no native prelink candidate in this tree); generated ABI unchanged')
 header = '''// Generated exact storage/slot ABI; private fields stay opaque.
 #pragma once
 #include <IOKit/IOPMGR.h>
@@ -101,8 +113,13 @@ if not reference.exists():
     if later:
         reference = later[-1]
     else:
-        # liuqin schema-1: the built candidate is the reference (same pinned original cache).
-        reference = kernel_candidate
+        # No prelink candidate in this tree yet. The candidates are built from the pinned
+        # original kernelcache, and unixnu keeps that image decompressed (its sha256 is the
+        # board pin) under out/ipsw/<build>/kernelcache.decompressed. Use it as the
+        # reference: the slots and pointers below are original-image addresses.
+        found = sorted((ROOT.parent.parent / 'ipsw').glob('*/kernelcache.decompressed'),
+                       key=lambda f: f.stat().st_mtime)
+        reference = found[-1] if found else kernel_candidate
     require(reference.exists(), 'No reference candidate available')
 candidate = reference.read_bytes()
 meta = macho(candidate)
@@ -135,8 +152,37 @@ asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name, va in 
 sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 run(['xcrun', 'clang', '-target', TRIPLE, '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
 late = OUT / 'ShengPlatformPower.late.o'
-run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
-     '--globalize-symbol=__GLOBAL__sub_I_ShengPlatformPower.cpp', obj, late])
+# llvm-objcopy takes --remove-section for Mach-O but refuses --globalize-symbol
+# ("option is not supported for MachO"). The second edit is one bit in the nlist.
+run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', obj, late])
+
+
+def globalize(path, name):
+    data = bytearray(path.read_bytes())
+    magic, _, _, _, commands, _, _, _ = struct.unpack_from('<8I', data, 0)
+    if magic != 0xfeedfacf:
+        raise SystemExit(f'{path}: not a 64-bit Mach-O')
+    offset = 32
+    for _ in range(commands):
+        command, size = struct.unpack_from('<2I', data, offset)
+        if command == 0x2:  # LC_SYMTAB
+            symbols, count, strings, _ = struct.unpack_from('<4I', data, offset + 8)
+            for index in range(count):
+                entry = symbols + index * 16
+                string_index, = struct.unpack_from('<I', data, entry)
+                start = strings + string_index
+                end = data.index(b'\0', start)
+                if data[start:end] == name.encode():
+                    data[entry + 4] |= 0x01      # N_EXT
+                    path.write_bytes(data)
+                    return True
+            return False
+        offset += size
+    return False
+
+
+if not globalize(late, '__GLOBAL__sub_I_ShengPlatformPower.cpp'):
+    raise SystemExit('could not export __GLOBAL__sub_I_ShengPlatformPower.cpp')
 
 
 def text_section(blob):

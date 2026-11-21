@@ -8,6 +8,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include <mach/kmod.h>
 #include <pexpert/pexpert.h>
+extern "C" void lq_journal_trace(unsigned int code, unsigned long long value);
 
 extern "C" {
 extern kmod_info_t g_kernel_kmod_info;
@@ -113,22 +114,31 @@ extern "C" void sheng_pmgr_run(void)
         sheng_pmgr_observation[13] || sheng_pmgr_observation[14]) break;
     if (mode == 3) provider->disableCPUCore(1);
     if (mode == 2) {
+      lq_journal_trace(200, 0);
       IOService *platform = IOService::getPlatform();
+      lq_journal_trace(201, reinterpret_cast<unsigned long long>(platform));
       if (!platform || !provider->attach(platform)) break;
+      lq_journal_trace(202, 0);
       if (!provider->start(platform)) { provider->detach(platform); break; }
+      lq_journal_trace(203, 0);
       if (!nub->attach(provider)) {
         provider->stop(platform); provider->detach(platform); break;
       }
+      lq_journal_trace(204, 0);
       if (!nub->start(provider)) {
         nub->detach(provider); provider->stop(platform); provider->detach(platform); break;
       }
+      lq_journal_trace(205, 0);
       provider->registerService(kIOServiceSynchronous);
+      lq_journal_trace(206, 0);
       nub->registerService(kIOServiceSynchronous);
+      lq_journal_trace(207, 0);
       sheng_pmgr_observation[0] = 5;
       sheng_pmgr_observation[13] = nub->getProvider() == provider && provider->getProvider() == platform;
       sheng_pmgr_observation[14] = (nub->getState() & provider->getState()) & kIOServiceRegisteredState;
       auto matching = IOService::serviceMatching("ApplePMGRNub");
       IOService *matched = matching ? IOService::waitForMatchingService(matching, 1000000) : nullptr;
+      lq_journal_trace(208, reinterpret_cast<unsigned long long>(matched));
       OSSafeReleaseNULL(matching);
       // Check actual service discovery and genuine type identity, then retain
       // both live objects. The registry and original nub refer to this provider.
@@ -139,6 +149,7 @@ extern "C" void sheng_pmgr_run(void)
       }
       sheng_pmgr_observation[10] = ShengPlatformPower::gMetaClass.getInstanceCount();
       sheng_pmgr_observation[12] = nubMeta->getInstanceCount();
+      lq_journal_trace(209, 0);
       sheng_pmgr_observation[1] = kIOReturnSuccess;
       OSSafeReleaseNULL(matched);
       OSSafeReleaseNULL(description);

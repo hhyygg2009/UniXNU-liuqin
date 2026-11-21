@@ -1,0 +1,860 @@
+diff --git a/NativeUfs.cpp b/NativeUfs.cpp
+index 2b164e0..9560ee1 100644
+--- a/NativeUfs.cpp
++++ b/NativeUfs.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: BSD-2-Clause-Patent
+ // Native sheng SM8550 UFS bring-up. Default-off: no MMIO is touched unless
+ // native-ufs-probe=1 is present. This is a register probe, not a storage driver.
++// placement-new declaration for the split-constructor probe (libkern/os/cpp_util.h)
++void * operator new (unsigned long, void *) noexcept; // placement_new_decl
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/storage/IOBlockStorageDevice.h>
+@@ -26,6 +28,7 @@ extern const uint8_t verified_root_key[];
+ #include <libkern/c++/OSIterator.h>
+ #include <IOKit/IOBSD.h>
+ #include <kern/thread.h>
++#include <kern/startup.h>
+ #include <kern/sched_prim.h>
+ extern "C" {
+ #include <kern/ast.h>   // ast_pending: no C linkage block of its own
+@@ -33,6 +36,7 @@ extern "C" {
+ #include <machine/machine_routines.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOMapper.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
+@@ -75,11 +79,19 @@ volatile uint32_t native_ufs_root_step = 0;
+ // board that made native-ufs-root=1 a guaranteed dead end. The bypass opens only with the
+ // explicit boot arg native-ufs-unauth-root=1 and is recorded here for the console report.
+ volatile uint32_t native_ufs_unauth_root = 0;
++#if !defined(NATIVE_VERIFIED_BLOCK) || !NATIVE_VERIFIED_BLOCK
++// Only the unverified publication path asks this question; in a verified build the
++// branch below is compiled out and the helper would be an unused static function.
++#if !defined(NATIVE_VERIFIED_BLOCK) || !NATIVE_VERIFIED_BLOCK
++// Only the unverified publication path asks this question; in a verified build the
++// branch below is compiled out and the helper would be an unused static function.
+ static bool rootUnauthGateOpen ()
+ {
+   unsigned unauth = 0;
+   return PE_parse_boot_argn ("native-ufs-unauth-root", &unauth, sizeof (unauth)) && unauth == 1;
+ }
++#endif
++#endif
+ const char *volatile native_ufs_root_failure = nullptr;
+ volatile uint32_t native_ufs_cap = 0;
+ volatile uint32_t native_ufs_version = 0;
+@@ -1121,7 +1133,12 @@ static void hostWaitCompletion (unsigned slot, uint32_t seen, uint64_t started)
+     return;
+   }
+   if (step == UfsWaitStep::Pause) {
+-    IODelay (2);
++    /* liuqin: IODelay waits on mach_absolute_time(), and this early in boot the
++     * timebase does not advance, so the delay never ends. Pause with a fixed
++     * number of cycles instead; the poll loop's own bound still ends the wait. */
++    for (unsigned pause = 0; pause < 200; ++pause) {
++      __asm__ __volatile__ ("" ::: "memory");
++    }
+     __atomic_fetch_add (&gWaitPauses, 1, __ATOMIC_RELAXED);
+     __atomic_fetch_add (&gWaitPauseTicks, mach_absolute_time () - now, __ATOMIC_RELAXED);
+     return;
+@@ -1269,6 +1286,30 @@ static void hostSlotsUpgrade (unsigned regionSlots, unsigned entries, bool wide)
+ // Bring the live controller up for reading: map, SMMU pass-through for the UFS stream, take over
+ // the request list, wake the device from UFS-PowerDown and wait for LUN 0 to be ready.
+ // `why` receives a short reason on failure.
++
++// ---- DMA window reserved at STARTUP ---------------------------------------------------------------
++// hostBringUp() runs from the driver's start, before the VM has settled: a
++// physically contiguous allocation there can walk the page queues for ever.
++// Reserve the one slot the transport needs at the earliest startup rank instead
++// (memory is still almost entirely free) and reuse it from hostBringUp().
++extern "C" {
++static void *gDmaPreallocVirt = NULL;
++static uint64_t gDmaPreallocPhys = 0;
++
++static void
++lqDmaPrealloc (void)
++{
++  vm_offset_t contig = 0;
++
++  if (kmem_alloc_contig (kernel_map, &contig, 139264, 4095, 0, 0,
++                         KMA_ZERO, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS && contig != 0) {
++    gDmaPreallocVirt = reinterpret_cast<void *> (contig);
++    gDmaPreallocPhys = ml_vtophys (contig);
++  }
++}
++}
++STARTUP (EARLY_BOOT, STARTUP_RANK_FIRST, lqDmaPrealloc);
++
+ static bool hostBringUp (const char **why)
+ {
+   if (gHost.poisoned) {
+@@ -1278,7 +1319,19 @@ static bool hostBringUp (const char **why)
+   if (gHost.ready) {
+     return true;
+   }
++
++  /* liuqin: IOMapper::gSystem starts as kUnknown and is only moved to
++   * kNoMapper/kHasMapper by IOMapper::setMapperRequired(), which Apple's platform
++   * expert calls during IOKit start-up. Nothing on this port calls it, so every
++   * IOBufferMemoryDescriptor creation blocks forever in waitForSystemMapper() --
++   * that is the storage bring-up hang. This board has no system IOMMU on this
++   * path, so declare the no-mapper state once. */
++  liuqin_milestone ("U", "h:mapper-none");
++  /* setMapperRequired() is protected; gSystem is public and kNoMapper is 0.
++   * Nobody is waiting yet (this is early single-threaded bring-up). */
++  IOMapper::gSystem = (IOMapper *) 0;
+   gRootDiagnostic.stage = "controller map";
++  liuqin_milestone ("U", "h:controller map");
+   gHost.hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, gHost.hcMap);
+   if (!gHost.hc) {
+     *why = "controller map";
+@@ -1291,26 +1344,90 @@ static bool hostBringUp (const char **why)
+     gRootDiagnostic.hce = read32 (gHost.hc, 0x34);
+   }
+   gRootDiagnostic.stage = "DMA allocation";
++  liuqin_milestone ("U", "h:DMA allocation");
+   // All kSlots command slots when the region is physically contiguous and addressable, else slot 0's original layout alone. The
+   // request list must also have entries for them (CAP.NUTRS, entries 0, 2, ...).
+   const bool wide = read32 (gHost.hc, 0) & 0x01000000;
+   const unsigned entries = (read32 (gHost.hc, 0) & 0x1f) + 1;
+   unsigned slots = (entries + 1) / 2 < kRegionSlots ? (entries + 1) / 2 : kRegionSlots;
++  liuqin_milestone ("U", "h:lock");
+   gHost.lock = IOLockAlloc ();
++  if ((gDmaPreallocVirt != NULL) && (gDmaPreallocPhys != 0) && (gHost.virt == NULL)) {
++    gHost.dma      = NULL;
++    gHost.virt     = reinterpret_cast<uint8_t *> (gDmaPreallocVirt);
++    gHost.phys     = gDmaPreallocPhys;
++    gHost.dmaBytes = kDmaBytesOneSlot;
++    liuqin_milestone ("U", "h:pre-used");
++  }
++  liuqin_milestone ("U", "h:lock-ok");
+   // Smaller regions keep the same layout for their first slots: 16, then 8, then 1.
+-  const uint32_t sizes[3] = { uint32_t (kDmaBytes), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytesOneSlot) };
+-  const unsigned counts[3] = { kRegionSlots, 8, 1 };
++  // liuqin: the 1 MiB physically-contiguous request blocks inside
++  // IOBufferMemoryDescriptor::inTaskWithOptions on this kernel. Start from the
++  // smallest region the transport accepts (one slot) and grow only if it works.
++  const uint32_t sizes[3] = { uint32_t (kDmaBytesOneSlot), uint32_t (kDmaBytesEightSlots), uint32_t (kDmaBytes) };
++  const unsigned counts[3] = { 1, 8, kRegionSlots };
+   for (unsigned attempt = 0; attempt < 3 && !gHost.virt; ++attempt) {
+     const uint32_t bytes = sizes[attempt];
+     if (counts[attempt] > slots && counts[attempt] > 1) continue;
++    liuqin_milestone ("U", counts[attempt] == 1 ? "h:alloc1" : counts[attempt] == 8 ? "h:alloc8" : "h:allocN");
++
++    /* liuqin: a wired IOBufferMemoryDescriptor never finishes its auto-prepare on
++     * this kernel (h:c3-wired). Take the physically contiguous pages from the VM
++     * directly -- this is the same kmem_alloc_contig() the IOKit path ends in --
++     * and translate them with ml_vtophys() instead of building a descriptor. */
++    {
++      vm_offset_t   contiguous = 0;
++      kern_return_t kr;
++
++      kr = kmem_alloc_contig (kernel_map, &contiguous, bytes, 4095, 0, 0,
++                              KMA_ZERO, VM_KERN_MEMORY_IOKIT);
++      if ((kr == KERN_SUCCESS) && (contiguous != 0)) {
++        vm_offset_t physical = ml_vtophys (contiguous);
++        if (physical != 0) {
++          gHost.dma      = NULL;
++          gHost.virt     = reinterpret_cast<uint8_t *> (contiguous);
++          gHost.phys     = physical;
++          gHost.dmaBytes = bytes;
++          liuqin_milestone ("U", "h:kmem-ok");
++          break;
++        }
++      }
++      liuqin_milestone ("U", "h:kmem-fail");
++    }
++    /* liuqin: IOBufferMemoryDescriptor::inTaskWithOptions with
++     * kIOMemoryPhysicallyContiguous never returns on this kernel -- same result
++     * from the mount path and from an early probe, and independent of the
++     * requested size. IOMallocContiguous() goes through kmem_alloc_contig, a
++     * different path; take it first and keep the descriptor route as fallback. */
++    {
++      IOPhysicalAddress  physical;
++      void              *contiguousVirt;
++
++      physical       = 0;
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++      contiguousVirt = IOMallocContiguous (bytes, 4096, &physical);
++#pragma clang diagnostic pop
++      if ((contiguousVirt != NULL) && (physical != 0)) {
++        gHost.dma      = NULL;
++        gHost.virt     = static_cast<uint8_t *> (contiguousVirt);
++        gHost.phys     = physical;
++        gHost.dmaBytes = bytes;
++        liuqin_milestone ("U", "h:contig-ok");
++        break;
++      }
++      liuqin_milestone ("U", "h:contig-null");
++    }
+     IOBufferMemoryDescriptor *dma = IOBufferMemoryDescriptor::inTaskWithOptions (
+       kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+       static_cast<IOOptionBits> (kIOMemoryMapperNone),
+       bytes, 4096);
+     if (!dma) continue;
++    liuqin_milestone ("U", "h:alloc-ok");
+     uint8_t *virt = static_cast<uint8_t *> (dma->getBytesNoCopy ());
+     IOByteCount contiguous = 0;
+     uint64_t phys = dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
++    liuqin_milestone ("U", "h:phys");
+     gRootDiagnostic.dma = phys;
+     gRootDiagnostic.contiguous = contiguous;
+     if (!virt || !phys || (phys & 4095) || contiguous < bytes || (!wide && phys + bytes > 0x100000000ULL)) {
+@@ -1319,19 +1436,26 @@ static bool hostBringUp (const char **why)
+     }
+     gHost.dma = dma; gHost.virt = virt; gHost.phys = phys; gHost.dmaBytes = bytes;
+   }
++  liuqin_milestone ("U", "h:dma-done");
+   if (!gHost.virt || !gHost.lock) {
+     *why = !gHost.lock ? "dma buffer" : "DMA address/contiguity";
+     return false;
+   }
+   const unsigned regionSlots = gHost.dmaBytes == kDmaBytes ? slots : gHost.dmaBytes == kDmaBytesEightSlots ? (slots < 8 ? slots : 8) : 1;
+   hostSlotGeometryRegionA (regionSlots);
++  liuqin_milestone ("U", "h:geom");
+   hostSlotsInit (regionSlots, gHost.lock);
++  liuqin_milestone ("U", "h:slots");
+   native_ufs_slots = gSlotCount;
+   bzero (gHost.virt, gHost.dmaBytes);
+   cacheCivac (gHost.virt, gHost.dmaBytes);
++  liuqin_milestone ("U", "h:civac");
+   uint32_t report[3] = { 0, 0, 0 };
+   gRootDiagnostic.stage = "SMMU and request list";
++  liuqin_milestone ("U", "h:SMMU and request list");
++  liuqin_milestone ("U", "h:stopq");
+   if (!hostStopQueue (why)) return false;
++  liuqin_milestone ("U", "h:stopq-ok");
+   smmuBypassStream (UFS_SMMU_STREAM_ID, gHost.smmuMap, report, gHost.phys, gHost.dmaBytes);
+   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
+   // The board's WiFi endpoint (wifi=2 or more) needs a pass-through stream of its own, set up here with the same code and at the same moment as the
+@@ -1481,6 +1605,7 @@ static bool hostBringUp (const char **why)
+   hostSlotsUpgrade (regionSlots, entries, wide);
+   if (!hostStartQueue (why)) return false;
+   gRootDiagnostic.stage = "NOP OUT";
++  liuqin_milestone ("U", "h:NOP OUT");
+   // NOP OUT proves the transport before touching the SCSI layer.
+   if (hostNop () != kIOReturnSuccess) {
+     gHost.ready = false;
+@@ -1489,6 +1614,7 @@ static bool hostBringUp (const char **why)
+   }
+   uint32_t power = 0;
+   gRootDiagnostic.stage = "power mode query";
++  liuqin_milestone ("U", "h:power mode query");
+   if (hostQueryRead (0x03, 0x02, &power) != kIOReturnSuccess) {
+     gHost.ready = false;
+     *why = "power mode query";
+@@ -1497,6 +1623,7 @@ static bool hostBringUp (const char **why)
+   gRootDiagnostic.power = power;
+   if ((power & 0xff) != 0x11) {
+     gRootDiagnostic.stage = "device wake";
++    liuqin_milestone ("U", "h:device wake");
+     // START STOP UNIT, power condition ACTIVE, to the UFS Device well-known LU (as Linux resumes).
+     uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+     uint32_t scsi = 0;
+@@ -1508,6 +1635,7 @@ static bool hostBringUp (const char **why)
+     IOSleep (50);
+   }
+   gRootDiagnostic.stage = "LUN ready";
++  liuqin_milestone ("U", "h:LUN ready");
+   for (unsigned attempt = 0; attempt < 20; attempt++) {
+     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
+     uint32_t scsi = 0;
+@@ -1546,7 +1674,7 @@ static uint32_t be32w (const uint8_t *at)
+ namespace {
+ struct StoreGeometry {
+   bool valid;
+-  uint64_t first, last, imageBytes, entriesLba;
++  uint64_t first, last, rootFirst, imageBytes, entriesLba;   // rootFirst: manifest base LBA (first + root offset)
+   uint32_t headerCrc, entriesCrc, entryCount;
+ };
+ StoreGeometry gStoreGeometry;
+@@ -1596,7 +1724,9 @@ extern "C" int native_ufs_store_open (uint64_t blocks, uint64_t *firstLba, const
+   else if (gStoreRegionBlocks) reason = "already open";
+   else {
+     uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
++    // The flashed root image starts at rootFirst (partition first LBA + root offset); the store still
++    // ends below the reserve at the end of the partition.
++    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096 + (gStoreGeometry.rootFirst - gStoreGeometry.first);
+     const uint64_t reserve = reserveBlocks ();
+     if (!blocks || reserve >= partition || blocks > partition - reserve) reason = "size";
+     else if (partition - blocks - reserve < imageBlocks + 1024) reason = "overlaps the root image";
+@@ -1825,7 +1955,8 @@ extern "C" int native_ufs_log_open (uint64_t *firstLba, uint64_t *blocks, const
+   else if (gLogRegionBlocks) reason = "already open";
+   else {
+     uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
++    // The log also stays clear of the root image, which starts at rootFirst (partition first + offset).
++    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096 + (gStoreGeometry.rootFirst - gStoreGeometry.first);
+     if (reserveBlocks () < kLogReserveBlocks + kExportBlocks) reason = "reserve too small for the log";
+     else if (partition - reserveBlocks () < imageBlocks + 1024) reason = "overlaps the root image";
+     else {
+@@ -2094,6 +2225,40 @@ static bool liuqinBlockAdoptSuperClass (const OSMetaClass *base, const char *pha
+ // another family lookup (and so a poison that comes back is caught, not inherited).
+ static const OSMetaClass *gBlockSuperClass = nullptr;
+ 
++// ---- liuqin v41 milestone journal -------------------------------------------
++// The panel is the only console during early root publication, and a hang there
++// can only be photographed. The windows area has unused tail blocks (the image is
++// 8.74 GiB of an 11.79 GiB partition), so each root step records a small page
++// there; after a reboot the host reads it back with root and gets the exact step.
++#define LIQ_JOURNAL_MAGIC 0x314A514C /* "LQJ1" */
++
++static uint64_t gJournalLba = 0;
++static uint8_t  gJournalPage[4096] __attribute__ ((aligned (4096))) = {};
++
++extern "C" void lq_journal_trace (uint32_t code, uint64_t ptr)
++{
++    if (!gJournalLba) return;
++    uint32_t magic = LIQ_JOURNAL_MAGIC;
++    memset (gJournalPage, 0, sizeof gJournalPage);
++    memcpy (gJournalPage + 0, &magic, sizeof magic);
++    memcpy (gJournalPage + 4, &code, sizeof code);
++    memcpy (gJournalPage + 8, &ptr, sizeof ptr);
++    (void) hostWrite4k (0, gJournalLba, 1, gJournalPage);
++}
++
++static void lqJournal (uint32_t code)
++{
++    if (!gJournalLba) return;
++    uint64_t stamp = mach_absolute_time ();
++    memset (gJournalPage, 0, sizeof gJournalPage);
++    uint32_t magic = LIQ_JOURNAL_MAGIC;
++    memcpy (gJournalPage + 0, &magic, sizeof magic);
++    memcpy (gJournalPage + 4, &code, sizeof code);
++    memcpy (gJournalPage + 8, &stamp, sizeof stamp);
++    (void) hostWrite4k (0, gJournalLba, 1, gJournalPage);
++}
++
++
+ #if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+ // The source runtime owns registration and attachment after IOStorageFamily
+ // has loaded. No second IOKit personality starts this service in that mode.
+@@ -2987,6 +3152,32 @@ bool NativeUfs::start (IOService *provider)
+   unsigned probe = 0, rootMode = 0;
+   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
+   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
++  // The SHNGROOT directory normally lives in the "userdata" GPT partition. A bring-up layout
++  // can name another entry (native-ufs-root-partition=linux_root) so the root image is installed
++  // and read from a partition the board actually has. Parsed once here, before any probe or
++  // startRoot call reaches findRootLayout().
++  char rootPartition[32] = {};
++  if (PE_parse_boot_argn ("native-ufs-root-partition", rootPartition, sizeof (rootPartition))) {
++    if (!setRootPartition (rootPartition)) {
++      IOLog ("NativeUfs: native-ufs-root-partition \"%s\" is not a usable GPT name; keeping %s\n",
++             rootPartition, gRootPartition);
++    } else {
++      IOLog ("NativeUfs: root partition is %s\n", gRootPartition);
++    }
++  }
++  // The root image may sit at a byte offset inside the root partition (typically the tail left
++  // after shrinking the Android f2fs). Every probe and startRoot reads findRootLayout()'s
++  // rootBaseLba instead of the partition start; an unaligned value is refused and 0 stays in use.
++  uint64_t rootOffset = 0;
++  if (PE_parse_boot_argn ("native-ufs-root-offset", &rootOffset, sizeof (rootOffset))) {
++    if (!setRootOffset (rootOffset)) {
++      setRootOffset (0);
++      IOLog ("NativeUfs: native-ufs-root-offset %llu is not 4096-byte aligned; using 0\n", rootOffset);
++    } else {
++      IOLog ("NativeUfs: root offset is %llu bytes (%llu blocks into %s)\n",
++             gRootOffsetBytes, gRootOffsetBytes / 4096, gRootPartition);
++    }
++  }
+   native_ufs_probe_requested = probe != 0;
+   liuqin_milestone ("U", probe ? "start-probe" : (rootMode ? "start-root" : "start-none"));
+   // Default: match for observability only, never touch the controller. Hardware work runs once,
+@@ -3014,7 +3205,7 @@ bool NativeUfs::start (IOService *provider)
+     adoptAndRead (probe);
+   }
+   if (probe == 10) {
+-    // Read-only check before anything is flashed: LUN 0 GPT -> "userdata" -> its first block.
++    // Read-only check before anything is flashed: LUN 0 GPT -> the root partition -> its first block.
+     const char *why = "";
+     if (!hostBringUp (&why)) {
+       lqPanic ("NATIVE_UFS root check: bring-up failed: %s", why);
+@@ -3024,10 +3215,11 @@ bool NativeUfs::start (IOService *provider)
+       lqPanic ("NATIVE_UFS root check: %s", why);
+     }
+     lqPanic ("NATIVE_UFS root check\n"
+-           "userdata first=%llx last=%llx\n"
++           "userdata first=%llx last=%llx root base=%llx offset=%llu\n"
+            "block0 magic %08x %08x ext4magic=%04x ext4blocks=%u\n"
+            "manifest status=%u windows=%u",
+-           layout->userdataFirst, layout->userdataLast, layout->magic0, layout->magic1,
++           layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, gRootOffsetBytes,
++           layout->magic0, layout->magic1,
+            layout->ext4Magic, layout->ext4Blocks, layout->manifestStatus, layout->windows);
+   }
+   if (probe == 11) {
+@@ -3044,7 +3236,7 @@ bool NativeUfs::start (IOService *provider)
+     uint32_t sig[4][2] = {};
+     uint32_t seen[4] = {};
+     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = layout->rootBaseLba * 4096ULL + layout->window[index].offset;
+       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
+         seen[index] = 1;
+         sig[index][0] = le32 (gScratch + 512);
+@@ -3052,17 +3244,118 @@ bool NativeUfs::start (IOService *provider)
+       }
+     }
+     lqPanic ("NATIVE_UFS root windows\n"
+-           "userdata first=%llx last=%llx manifest status=%u windows=%u\n"
++           "userdata first=%llx last=%llx root base=%llx offset=%llu manifest status=%u windows=%u\n"
+            "w0 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
+            "w1 %s off=%llx size=%llx gpt=%08x %08x read=%u\n"
+            "w0 sha %08x %08x %08x %08x\n"
+            "w1 sha %08x %08x %08x %08x",
+-           layout->userdataFirst, layout->userdataLast, layout->manifestStatus, layout->windows,
++           layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, gRootOffsetBytes,
++           layout->manifestStatus, layout->windows,
+            layout->window[0].name, layout->window[0].offset, layout->window[0].size, sig[0][0], sig[0][1], seen[0],
+            layout->window[1].name, layout->window[1].offset, layout->window[1].size, sig[1][0], sig[1][1], seen[1],
+            be32w (layout->window[0].sha256), be32w (layout->window[0].sha256 + 4), be32w (layout->window[0].sha256 + 8), be32w (layout->window[0].sha256 + 12),
+            be32w (layout->window[1].sha256), be32w (layout->window[1].sha256 + 4), be32w (layout->window[1].sha256 + 8), be32w (layout->window[1].sha256 + 12));
+   }
++  if (probe == 15) {
++    // Read-only GPT dump of LUN 0 (4096-byte sectors): every used entry with its name and
++    // first/last LBA, at most 40 entries. This is how the install plan is checked against the
++    // partition table the device actually has before any write; nothing is written here.
++    const char *why = "";
++    if (!hostBringUp (&why)) {
++      lqPanic ("NATIVE_UFS gpt dump: bring-up failed: %s", why);
++    }
++    if (hostRead4k (0, 1, 1, gScratch) != kIOReturnSuccess) {
++      lqPanic ("NATIVE_UFS gpt dump: header read failed");
++    }
++    uint32_t sig0 = le32 (gScratch), sig1 = le32 (gScratch + 4);
++    uint32_t headerBytes = le32 (gScratch + 12), headerCrc = le32 (gScratch + 16);
++    uint32_t entriesCrc = le32 (gScratch + 88), count = le32 (gScratch + 80);
++    uint32_t entrySize = le32 (gScratch + 84);
++    uint64_t headerLba = le64 (gScratch + 24), backupLba = le64 (gScratch + 32);
++    uint64_t firstUsable = le64 (gScratch + 40), lastUsable = le64 (gScratch + 48);
++    uint64_t entriesLba = le64 (gScratch + 72);
++    if (sig0 != 0x20494645U || sig1 != 0x54524150U || entrySize != 128 || headerBytes < 92 ||
++        headerBytes > 4096 || !count || count > 128 || entriesLba < 2 || entriesLba > 64) {
++      lqPanic ("NATIVE_UFS gpt dump: unexpected header sig=%08x %08x esz=%u cnt=%u elba=%llx",
++             sig0, sig1, entrySize, count, entriesLba);
++    }
++    bool headerCrcOk = rootCrc32 (gScratch, headerBytes, true) == headerCrc;
++    uint32_t blocks = (count * 128 + 4095) / 4096;
++    if (hostRead4k (0, entriesLba, blocks, gScratch) != kIOReturnSuccess) {
++      lqPanic ("NATIVE_UFS gpt dump: entries read failed elba=%llx blocks=%u", entriesLba, blocks);
++    }
++    bool entriesCrcOk = rootCrc32 (gScratch, count * 128) == entriesCrc;
++    static char text[4096];
++    int used = snprintf (text, sizeof (text),
++                         "NATIVE_UFS gpt dump LUN0\n"
++                         "hdr=%llx backup=%llx usable=%llx..%llx elba=%llx cnt=%u crc %s/%s\n",
++                         headerLba, backupLba, firstUsable, lastUsable, entriesLba, count,
++                         headerCrcOk ? "ok" : "bad", entriesCrcOk ? "ok" : "bad");
++    unsigned listed = 0;
++    for (uint32_t index = 0; index < count && listed < 40; index++) {
++      const uint8_t *entry = gScratch + index * 128;
++      if (!rootEntryUsed (entry)) {
++        continue;
++      }
++      if (used > int (sizeof (text)) - 128) {
++        break;
++      }
++      char name[37];
++      unsigned length = 0;
++      while (length < 36) {
++        uint8_t lo = entry[56 + 2 * length], hi = entry[57 + 2 * length];
++        if (!lo && !hi) {
++          break;
++        }
++        name[length] = (hi == 0 && lo >= 0x20 && lo <= 0x7e) ? char (lo) : '?';
++        length++;
++      }
++      name[length] = 0;
++      uint64_t first = le64 (entry + 32), last = le64 (entry + 40);
++      used += snprintf (text + used, sizeof (text) - used, "%u:%s %llx-%llx %lluM%s",
++                        index, name, first, last,
++                        first <= last ? ((last - first + 1) * 4096ULL) >> 20 : 0ULL,
++                        (++listed % 2) ? "  " : "\n");
++    }
++    used += snprintf (text + used, sizeof (text) - used, "\nlisted=%u/%u", listed, count);
++    if (used > int (sizeof (text)) - 96) {
++      used = int (sizeof (text)) - 96;   // keep room for the root-base line on a full dump
++    }
++    // The base the root driver reads the manifest from: the GPT first LBA of the root partition
++    // plus native-ufs-root-offset. Printed with the dump so the panel report and the boot argument
++    // can be compared without another probe.
++    uint64_t rootFirst = 0;
++    bool rootFound = false;
++    for (uint32_t index = 0; index < count; index++) {
++      const uint8_t *entry = gScratch + index * 128;
++      if (!rootEntryUsed (entry)) {
++        continue;
++      }
++      unsigned matched = 0;
++      while (matched < 31 && gRootPartition[matched] &&
++             entry[56 + 2 * matched] == static_cast<uint8_t> (gRootPartition[matched]) &&
++             entry[57 + 2 * matched] == 0) {
++        matched++;
++      }
++      if (!gRootPartition[matched] && !entry[56 + 2 * matched] && !entry[57 + 2 * matched]) {
++        rootFirst = le64 (entry + 32);
++        rootFound = true;
++        break;
++      }
++    }
++    if (used < int (sizeof (text)) - 64) {
++      used += snprintf (text + used, sizeof (text) - used, "\nroot base lba=%llu offset=%llu%s",
++                        rootFound ? rootFirst + gRootOffsetBytes / 4096 : 0ULL, gRootOffsetBytes,
++                        rootFound ? "" : " (root partition not in GPT)");
++    }
++    // lqPanic() formats into a 512-byte line, so a full GPT list has to go through the console
++    // mirror directly; the panic that closes the probe then carries the summary.
++    if (used < 480) {
++      lqPanic ("%s", text);
++    }
++    liuqin_debug_puts (text);
++    lqPanic ("NATIVE_UFS gpt dump: %u of %u entries listed above", listed, count);
++  }
+   if (probe == 14) {
+     // Immediate memory snapshot at root-device start, before the userspace that triggers jetsam.
+     lqPanic ("NATIVE_UFS early memory snapshot\n"
+@@ -3106,13 +3399,18 @@ bool NativeUfs::start (IOService *provider)
+ // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
+ bool NativeUfs::startRoot (IOService *provider)
+ {
++  lqJournal (0);   // startRoot entered; gJournalLba is still 0 so this is a no-op
++
+   const char *why = "";
++  liuqin_milestone ("U", "r0-enter");
+   native_ufs_root_step = 1;
+   // liuqin (H16-F, v39): the class object was built at boot and its superClassLink was
+   // scribbled before postModLoad's ancestor walk. Repair it here, before the first
+   // NativeUfsBlock exists, then prove the chain walkable. Nothing is refused for a name
+   // the family legitimately owns -- v36's gate was the false positive (H16-E).
+   const OSMetaClass *base = liuqinBlockSuperClass ();
++  liuqin_milestone ("U", "r1-base");
++  liuqin_milestone ("U", "r1-base");
+   if (!base) {
+     liuqin_milestone ("U", "base-missing");
+     rootDiagnosticFailure ("IOBlockStorageDevice metaclass is not registered");
+@@ -3127,7 +3425,9 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   gBlockSuperClass = base;
++  liuqin_milestone ("U", "r2-abi");
+   liuqinBlockAdoptSuperClass (base, "pre");
++  liuqin_milestone ("U", "r3-adopt");
+   if (!liuqinBlockChainOk (NativeUfsBlock::metaClass)) {
+     liuqin_milestone ("U", "chain");
+     rootDiagnosticFailure ("NativeUfsBlock metaclass chain is still unwalkable");
+@@ -3135,6 +3435,7 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "meta-ok");
++  liuqin_milestone ("U", "r4-host");
+   if (!hostBringUp (&why)) {
+     liuqin_milestone ("U", "root-bringup-fail");
+     rootDiagnosticFailure (why);
+@@ -3142,6 +3443,7 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "root-bringup-ok");
++  lqJournal (1);
+   native_ufs_root_step = 2;
+   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+   if (!layout || !findRootLayout (layout, &why)) {
+@@ -3152,20 +3454,27 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "root-layout-ok");
++  gJournalLba = layout->userdataFirst + 2400000ULL;   // 9.16 GiB into the target partition
++  if (!hostLogOpen (gJournalLba, 1)) {
++    // The log export integration already owns the single log window: journal off.
++    gJournalLba = 0;
++  }
++  lqJournal (2);
+   native_ufs_root_step = 3;
+   if (layout->manifestStatus != 0) {
+     rootDiagnosticFailure ("root manifest rejected");
+-    IOLog ("NativeUfs: no valid root manifest in userdata (status %u, magic %08x %08x)\n",
+-           layout->manifestStatus, layout->magic0, layout->magic1);
++    IOLog ("NativeUfs: no valid root manifest at base LBA %llu (offset %llu, status %u, magic %08x %08x)\n",
++           layout->rootBaseLba, gRootOffsetBytes, layout->manifestStatus, layout->magic0, layout->magic1);
+     IOFree (layout, sizeof (RootLayout));
+     return false;
+   }
+-  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+-                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
++  gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->rootBaseLba, layout->imageBytes,
++                     layout->gptEntriesLba, layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
+   gRootObjects = layout->objects;
+   for (unsigned i = 0; i < layout->objects; ++i) gRootObject[i] = layout->object[i];
+-  gRootObjectBase = layout->userdataFirst * 4096ULL;
++  gRootObjectBase = layout->rootBaseLba * 4096ULL;
+   liuqin_milestone ("U", "root-manifest-ok");
++  lqJournal (3);
+   const char *names[4] = {};
+   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
+   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {
+@@ -3175,6 +3484,7 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "root-plan-ok");
++  lqJournal (4);
+   if (!IOService::start (provider)) {
+     liuqin_milestone ("U", "root-iostart-fail");
+     rootDiagnosticFailure ("root IOService start failed");
+@@ -3182,6 +3492,7 @@ bool NativeUfs::startRoot (IOService *provider)
+     return false;
+   }
+   liuqin_milestone ("U", "root-iostart-ok");
++  lqJournal (5);
+   // Prepare all windows or publish none. Diagnostics never decide policy.
+   gPending = 0;
+   gPendingProvider = this;
+@@ -3196,16 +3507,42 @@ bool NativeUfs::startRoot (IOService *provider)
+       // liuqin (H16-F, v39): this runs on the publisher thread, later than startRoot's
+       // repair. If the field was rewritten again in between, put it back before the
+       // instance exists: attach's provider checks walk this chain immediately.
++      lqJournal (10 + index);
+       if (gBlockSuperClass) liuqinBlockAdoptSuperClass (gBlockSuperClass, "prep");
+-      NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
++      lqJournal (20 + index);
++      liuqin_milestone ("U", "prep-alloc");
++      /* liuqin: the repaired metaclass is a force-registered object; going
++       * through metaClass->alloc() has not returned, so construct directly. */
++      liuqin_milestone ("U", "prep-canary");
++      OSObject *canary = OSTypeAlloc (OSData);
++      liuqin_milestone ("U", (canary != NULL) ? "prep-canary-ok" : "prep-canary-null");
++      if (canary) canary->release ();
++      liuqin_milestone ("U", "prep-new");
++      lqJournal (30 + index);
++      /* Split the two halves of `new`: the macro-generated typed operator new
++       * (kalloc_type view) and the constructor chain (superclass ctor + the
++       * metaClass instanceConstructed() walk). */
++      void *rawDevice = NativeUfsBlock::operator new (sizeof (NativeUfsBlock));
++      lqJournal (rawDevice ? (31 + index) : (32 + index));
++      NativeUfsBlock *device = rawDevice ? ::new (rawDevice) NativeUfsBlock : NULL;
++      lqJournal (device ? (40 + index) : (41 + index));
++      liuqin_milestone ("U", "prep-new-ok");
++      liuqin_milestone ("U", "prep-alloc-ok");
+       gPendingDevice[index] = device;
+       gPendingAttached[index] = false;
+       gPendingUuid[index][0] = 0;
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = layout->rootBaseLba * 4096ULL + layout->window[index].offset;
++      liuqin_milestone ("U", "prep-init");
+       if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
+           !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
++      lqJournal (50 + index);
++      liuqin_milestone ("U", "prep-conf-ok");
+       gRootDiagnostic.stage = "root window attachment";
++      liuqin_milestone ("U", "prep-attach");
++      lqJournal (60 + index);
+       if (!device->attach (owner)) return false;
++      lqJournal (70 + index);
++      liuqin_milestone ("U", "prep-attach-ok");
+       gPendingAttached[index] = true;
+       ++gPending;
+       gRootDiagnostic.prepared = gPending;
+@@ -3252,6 +3589,7 @@ bool NativeUfs::startRoot (IOService *provider)
+   } operations = { this, layout };
+   UfsRootPublicationResult result = ufsPrepareRootWindows (operations, layout->windows);
+   IOFree (layout, sizeof (RootLayout));
++  lqJournal (100);
+   if (result.phase == UfsRootPhase::Complete) {
+     liuqin_milestone ("U", "root-prepared");
+   } else {
+diff --git a/RootCommands.h b/RootCommands.h
+index d6e1221..7b211e0 100644
+--- a/RootCommands.h
++++ b/RootCommands.h
+@@ -251,7 +251,9 @@ static IOReturn hostNop (void)
+   if (!hostClearUcd (slot)) return kIOReturnNotReady;
+   slot.ucd[3] = 1;
+   uint32_t ocs = 15;
++  liuqin_milestone ("U", "h:nop-wait");
+   IOReturn result = hostSubmit (slot, 0, 0, 200000, &ocs);
++  liuqin_milestone ("U", (result == kIOReturnSuccess) ? "h:nop-ok" : "h:nop-fail");
+   if (result != kIOReturnSuccess) return result;
+   result = hostResponseHeader (slot, 0x20, 0, 1);
+   if (result != kIOReturnSuccess) return result;
+diff --git a/RootLayout.h b/RootLayout.h
+index 82851d6..bbed43c 100644
+--- a/RootLayout.h
++++ b/RootLayout.h
+@@ -4,13 +4,14 @@
+ // ---- LUN 0 GPT and the root-image manifest -------------------------------------------------
+ struct RootWindow {
+   char name[32];
+-  uint64_t offset;   // bytes from the start of the userdata partition
++  uint64_t offset;   // bytes from the start of the root partition
+   uint64_t size;     // bytes
+   uint8_t sha256[32];
+ };
+ 
+ struct RootLayout {
+-  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
++  uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0; the root partition ("userdata" by default)
++  uint64_t rootBaseLba;                   // 4096-byte LBA the manifest is read from: userdataFirst + root offset/4096
+   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
+   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
+   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
+@@ -56,8 +57,57 @@ static bool rootEntryUsed (const uint8_t *entry)
+   return used != 0;
+ }
+ 
+-// Find the partition named "userdata" in LUN 0's primary GPT (4096-byte sectors), then read the
+-// manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
++// The GPT partition that carries the SHNGROOT directory. NativeUfs::start() overrides it from
++// the native-ufs-root-partition boot argument before any probe or root start reaches
++// findRootLayout(); without that argument the driver keeps looking in "userdata", the board
++// default (all installed layouts used to live there).
++static char gRootPartition[32] = "userdata";
++
++// Install a partition name for findRootLayout(). The value is compared against the GPT entry's
++// UTF-16LE name, so only printable ASCII that fits the 32-byte record is accepted. On refusal the
++// current name (the board default or an earlier accepted override) is kept and false is returned.
++static inline bool setRootPartition (const char *name)
++{
++  if (!name) {
++    return false;
++  }
++  size_t length = 0;
++  while (length < sizeof (gRootPartition) - 1 && name[length]) {
++    if (name[length] < 0x20 || name[length] > 0x7e) {
++      return false;
++    }
++    length++;
++  }
++  if (!length || name[length]) {
++    return false;
++  }
++  bzero (gRootPartition, sizeof (gRootPartition));
++  memcpy (gRootPartition, name, length);
++  return true;
++}
++
++// A root image may be placed at a byte offset inside the root partition (boot argument
++// native-ufs-root-offset, typically the tail left after shrinking the Android f2fs). Only a
++// 4096-byte aligned offset is meaningful: the manifest base LBA moves by offset/4096, while
++// userdataFirst/userdataLast stay the GPT entry's own bounds (reporting, and the store/log
++// windows anchored at the end of the partition).
++static uint64_t gRootOffsetBytes = 0;
++
++// Install the in-partition byte offset. The caller records it for findRootLayout(); only the
++// 4096-byte block alignment is checked here, and on refusal the previous value is kept.
++static inline bool setRootOffset (uint64_t bytes)
++{
++  if (bytes & 4095) {
++    return false;
++  }
++  gRootOffsetBytes = bytes;
++  return true;
++}
++
++// Find the root partition (gRootPartition: "userdata" unless native-ufs-root-partition named
++// another GPT entry) in LUN 0's primary GPT (4096-byte sectors), then read the manifest at the
++// partition's first block plus gRootOffsetBytes. Read-only. Returns false only if the GPT itself
++// is unusable.
+ static bool findRootLayout (RootLayout *layout, const char **why)
+ {
+   gRootDiagnostic.stage = "GPT header";
+@@ -105,7 +155,11 @@ static bool findRootLayout (RootLayout *layout, const char **why)
+     *why = "GPT entries CRC";
+     return false;
+   }
+-  static const char wanted[] = "userdata";
++  const char *wanted = gRootPartition;
++  unsigned wantedLength = 0;
++  while (wanted[wantedLength]) {
++    wantedLength++;
++  }
+   bool found = false;
+   for (uint32_t index = 0; index < count; index++) {
+     const uint8_t *entry = gScratch + index * 128;
+@@ -123,15 +177,20 @@ static bool findRootLayout (RootLayout *layout, const char **why)
+       }
+     }
+     bool match = true;
+-    for (unsigned c = 0; c < sizeof (wanted); c++) {
++    for (unsigned c = 0; c < wantedLength; c++) {
+       if (entry[56 + 2 * c] != static_cast<uint8_t> (wanted[c]) || entry[57 + 2 * c] != 0) {
+         match = false;
+         break;
+       }
+     }
++    // The GPT name is NUL terminated UTF-16LE: the character after the wanted name must be the
++    // empty one, otherwise "userdata" would also match a longer name such as "userdata2".
++    if (match && (entry[56 + 2 * wantedLength] || entry[57 + 2 * wantedLength])) {
++      match = false;
++    }
+     if (match) {
+       if (found) {
+-        *why = "duplicate userdata partition";
++        *why = "duplicate root partition";
+         return false;
+       }
+       layout->userdataFirst = le64 (entry + 32);
+@@ -140,15 +199,21 @@ static bool findRootLayout (RootLayout *layout, const char **why)
+     }
+   }
+   if (!found || layout->userdataLast < layout->userdataFirst) {
+-    *why = "no userdata partition";
++    *why = "no root partition";
++    return false;
++  }
++  layout->rootBaseLba = layout->userdataFirst + gRootOffsetBytes / 4096;
++  if (layout->rootBaseLba > layout->userdataLast) {
++    *why = "root offset outside the root partition";
+     return false;
+   }
+   gRootDiagnostic.first = layout->userdataFirst;
+   gRootDiagnostic.last = layout->userdataLast;
+   gRootDiagnostic.stage = "root manifest";
+-  // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
+-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
+-    *why = "userdata first block read";
++  // The manifest block: the partition's first block for an in-place image, or the configured
++  // offset inside it for an image placed in the tail (rootBaseLba). Read-only either way.
++  if (hostRead4k (0, layout->rootBaseLba, 1, gScratch) != kIOReturnSuccess) {
++    *why = "root manifest block read";
+     return false;
+   }
+   layout->magic0 = le32 (gScratch);
+@@ -170,7 +235,8 @@ static bool findRootLayout (RootLayout *layout, const char **why)
+       SHA256_Final (digest, &context);
+       layout->manifestStatus = 3;
+       if (memcmp (digest, gScratch + 4064, 32) == 0) {
+-        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
++        // Bounds are measured from the manifest base, so an offset image cannot reach past the GPT end.
++        uint64_t partitionBytes = (layout->userdataLast + 1 - layout->rootBaseLba) * 4096ULL;
+         layout->manifestStatus = 4;
+         bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes;
+         for (uint32_t index = 0; index < n && bounds; index++) {
+diff --git a/TransferPoll.h b/TransferPoll.h
+index 2f56e30..4dd5e89 100644
+--- a/TransferPoll.h
++++ b/TransferPoll.h
+@@ -6,6 +6,9 @@ struct UfsTransferPoll {
+   uint32_t polls = 0, doorbellSeen = 0, interruptSeen = 0, ocs = 15;
+ };
+ static constexpr uint32_t kUfsFatalStatus = 0x71880U;
++// liuqin: bring-up runs before the timer is reliable, so a deadline-based
++// loop can spin forever (mach_absolute_time() stays put). Bound it.
++static constexpr uint32_t kUfsMaxPolls = 20000U;
+ 
+ template <class Port>
+ static UfsTransferEnd pollUfsTransfer(Port &port, UfsTransferPoll &state)
+@@ -22,7 +25,7 @@ static UfsTransferEnd pollUfsTransfer(Port &port, UfsTransferPoll &state)
+       // Also allow a completion so fast that software never observes DB=1.
+       if (state.ocs != 15) return UfsTransferEnd::Completed;
+     }
+-    if (port.expired()) return UfsTransferEnd::Timeout;
++    if ((state.polls >= kUfsMaxPolls) || port.expired()) return UfsTransferEnd::Timeout;
+     port.delay();
+   }
+ }

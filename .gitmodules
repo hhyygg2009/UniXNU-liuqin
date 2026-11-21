@@ -1,3 +1,4 @@
 [submodule "drivers/ShengUfs"]
 	path = drivers/ShengUfs
-	url = https://github.com/hhyygg2009/ShengUfs.git
+	url = https://github.com/Fly116/ShengUfs.git
+	branch = liuqin-sm8475-v56

@@ -1,0 +1,133 @@
+diff --git a/drivers/ShengUfs/NativeUfs.cpp b/drivers/ShengUfs/NativeUfs.cpp
+--- a/drivers/ShengUfs/NativeUfs.cpp
++++ b/drivers/ShengUfs/NativeUfs.cpp
+@@ -37,6 +37,8 @@
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSString.h>
++#include <libkern/c++/OSSymbol.h>            // liuqin H16-F: family metaclass lookup
++#include <libkern/c++/OSMetaClass.h>
+ #include <libkern/libkern.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/debug.h>
+@@ -2023,6 +2025,75 @@
+ };
+ OSDefineMetaClassAndStructors (NativeUfsBlock, IOBlockStorageDevice)
+ 
++// ---- liuqin (H16-F, v39): controlled repair of the block class's superClassLink ----
++// The boot C++ pass constructs this class's metaclass with the family's metaclass and
++// something then writes eight bytes of console text over superClassLink (offset +0x10)
++// before OSMetaClass::postModLoad walks the ancestor chain. The H16-E scan in
++// patches/xnu/zzzzzzzzzz-liuqin-metaclass-stalled-diagnostics.patch survives that by
++// dropping the slot, which also keeps this class out of sAllClassesDict -- and a dropped
++// slot is not the same thing as a usable class.
++//
++// The value the field has to hold is not a compile-time constant in this port: it is
++// whichever metaclass IOStorageFamily registered under "IOBlockStorageDevice", and the
++// family is already in the prelinked closure by the time the root is started. So the
++// field is put back at a controlled time instead of being restated at link time.
++//
++// The layout below is the one the H16-E diagnostics already validate against the shipped
++// image: vtable +0x00, reserved +0x08, superClassLink +0x10, className +0x18,
++// classSize +0x20. If OSMetaClass ever changes shape, getClassSize() no longer reads
++// sizeof(NativeUfsBlock) and the ABI gate in startRoot refuses before any write.
++struct LiqMetaShim {
++  const void        *vtable;
++  const void        *reserved;
++  const OSMetaClass *superClassLink;
++  const void        *className;
++  unsigned int       classSize;
++};
++
++// The family's registered metaclass, or null while IOStorageFamily is not there yet.
++static const OSMetaClass *liuqinBlockSuperClass (void)
++{
++  const OSSymbol *name = OSSymbol::withCString ("IOBlockStorageDevice");
++  if (!name) return nullptr;
++  const OSMetaClass *base = OSMetaClass::getMetaClassWithName (name);
++  name->release ();
++  return base;
++}
++
++// Bounded, never dereferences an implausible pointer: the same validation the XNU-side
++// scan uses, applied to our own chain after the repair.
++static bool liuqinBlockChainOk (const OSMetaClass *meta)
++{
++  const void *cur = meta;
++  for (unsigned hops = 0; cur; ++hops) {
++    if ((uintptr_t)cur < 0xfffffff000000000ULL || hops > 64) return false;
++    cur = static_cast<const LiqMetaShim *> (cur)->superClassLink;
++  }
++  return true;
++}
++
++// Rewrites superClassLink only when it differs, so a re-offer is a no-op and never a
++// second registration (the H16 reentrancy lesson). Returns true when it wrote.
++static bool liuqinBlockAdoptSuperClass (const OSMetaClass *base, const char *phase)
++{
++  LiqMetaShim *shim = reinterpret_cast<LiqMetaShim *> (
++      const_cast<OSMetaClass *> (NativeUfsBlock::metaClass));
++  char line[160];
++  __builtin_snprintf (line, sizeof line, "NativeUfs: M:reg %s p=%p link=%p\n",
++                      phase, (const void *)shim, (const void *)shim->superClassLink);
++  liuqin_debug_puts (line);                 // H11: panel console, never the silent KDB path
++  if (shim->superClassLink == base) return false;
++  shim->superClassLink = base;
++  __builtin_snprintf (line, sizeof line, "NativeUfs: M:reg %s fixed link=%p\n",
++                      phase, (const void *)shim->superClassLink);
++  liuqin_debug_puts (line);
++  return true;
++}
++
++// Set by startRoot so the publisher thread can re-arm before every allocation without
++// another family lookup (and so a poison that comes back is caught, not inherited).
++static const OSMetaClass *gBlockSuperClass = nullptr;
++
+ #if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
+ // The source runtime owns registration and attachment after IOStorageFamily
+ // has loaded. No second IOKit personality starts this service in that mode.
+@@ -3037,6 +3108,33 @@
+ {
+   const char *why = "";
+   native_ufs_root_step = 1;
++  // liuqin (H16-F, v39): the class object was built at boot and its superClassLink was
++  // scribbled before postModLoad's ancestor walk. Repair it here, before the first
++  // NativeUfsBlock exists, then prove the chain walkable. Nothing is refused for a name
++  // the family legitimately owns -- v36's gate was the false positive (H16-E).
++  const OSMetaClass *base = liuqinBlockSuperClass ();
++  if (!base) {
++    liuqin_milestone ("U", "base-missing");
++    rootDiagnosticFailure ("IOBlockStorageDevice metaclass is not registered");
++    IOLog ("NativeUfs: IOStorageFamily metaclass missing; root publication refused\n");
++    return false;
++  }
++  if (NativeUfsBlock::metaClass->getClassSize () != sizeof (NativeUfsBlock)) {
++    liuqin_milestone ("U", "abi");
++    rootDiagnosticFailure ("NativeUfsBlock metaclass classSize does not match the class");
++    IOLog ("NativeUfs: metaclass ABI mismatch: %u != %lu\n",
++           NativeUfsBlock::metaClass->getClassSize (), (unsigned long)sizeof (NativeUfsBlock));
++    return false;
++  }
++  gBlockSuperClass = base;
++  liuqinBlockAdoptSuperClass (base, "pre");
++  if (!liuqinBlockChainOk (NativeUfsBlock::metaClass)) {
++    liuqin_milestone ("U", "chain");
++    rootDiagnosticFailure ("NativeUfsBlock metaclass chain is still unwalkable");
++    IOLog ("NativeUfs: block metaclass chain invalid after repair\n");
++    return false;
++  }
++  liuqin_milestone ("U", "meta-ok");
+   if (!hostBringUp (&why)) {
+     liuqin_milestone ("U", "root-bringup-fail");
+     rootDiagnosticFailure (why);
+@@ -3095,6 +3193,10 @@
+       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
+       gRootDiagnostic.publicationWindow = index;
+       gRootDiagnostic.windowBytes = layout->window[index].size;
++      // liuqin (H16-F, v39): this runs on the publisher thread, later than startRoot's
++      // repair. If the field was rewritten again in between, put it back before the
++      // instance exists: attach's provider checks walk this chain immediately.
++      if (gBlockSuperClass) liuqinBlockAdoptSuperClass (gBlockSuperClass, "prep");
+       NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+       gPendingDevice[index] = device;
+       gPendingAttached[index] = false;

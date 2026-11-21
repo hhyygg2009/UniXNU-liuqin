@@ -42,7 +42,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]          # the assembled tree
 DEVICE = Path(os.environ.get('UNIXNU_DEVICE', ROOT))
-sys.path.insert(0, str(ROOT / 'kits' / 'XnuPrelink'))
+# The liuqin-build tree still carries the native prelink kit as kits/NativePrelink;
+# the newer tree renamed it to kits/XnuPrelink. Pick whichever one holds the module.
+_KIT = next((ROOT / 'kits' / _name for _name in ('XnuPrelink', 'NativePrelink')
+             if (ROOT / 'kits' / _name / 'native_prelink.py').is_file()),
+            ROOT / 'kits' / 'NativePrelink')
+sys.path.insert(0, str(_KIT))
 sys.path.insert(0, str(ROOT / 'scripts'))
 import native_prelink as np                          # noqa: E402
 from kernel_target import TRIPLE                     # noqa: E402
@@ -212,27 +217,39 @@ def main():
         fail('storage base destructor layout changed')
 
     # ---- 6. placement semantics --------------------------------------------
-    # liuqin's prelink keeps the original cache bytes in place (the emit step
-    # reports "executable bytes unchanged") and slides the WHOLE cache by the
-    # board-pinned value at load time.  Kernel and kexts therefore share one
-    # address space, so the bindings are the raw original-cache VAs; there is
-    # no auto-slide repacking of the prelink bundle as on mondrian.
+    # emit_prelink.py writes every component segment at (original cache VA +
+    # slide) (append_segment()), board.toml [kernel.prelink] pins that slide
+    # (-0x1000000 here, so the kexts clear the larger native kernel), and the
+    # kernel boots at its link address (vm_kernel_slide == 0).  A link-time
+    # absolute import of an IOStorageFamily symbol must therefore be the
+    # emitted VA, i.e. cache VA + slide.  Binding the raw cache VA leaves every
+    # import 16 MiB above the kext: the first one used, the protected
+    # constructor, lands in zero-filled __PLK_TEXT_EXEC padding (UDF #0), which
+    # is exactly what stalled block publication at `new NativeUfsBlock`.
     slide = 0
+    board_toml = DEVICE / 'board.toml'
+    if board_toml.is_file():
+        pinned = re.search(r'^\s*slide\s*=\s*"([^"]+)"', board_toml.read_text(), re.M)
+        if pinned:
+            slide = int(pinned.group(1), 0)
     base = min(s['va'] for s in kernel['segments'] if s['name'].startswith('__PRELINK') and s['size'])
     fixed = base
     kernel_json = ROOT.parent / 'kernel/kernel.json'
     if kernel_json.is_file():
         recorded = json.loads(kernel_json.read_text())
-        print(f'board slide {recorded.get("slide", 0):#x} applies uniformly at load; '
-              f'bindings use raw cache VAs (prelink base {base:#x})')
+        if recorded.get('slide', slide) != slide:
+            fail(f'prelink slide mismatch: board {slide:#x} vs kernel.json {recorded["slide"]:#x}')
+    if slide == 0 or slide % 0x1000:
+        fail(f'prelink slide {slide:#x}: refuse to bind raw cache VAs')
+    print(f'board prelink slide {slide:#x}: bindings use emitted VAs (cache VA + slide)')
 
     # ---- 7. optional live verification from the QEMU snapshot ---------------
     live = False
     if args.snapshot.is_file():
         d = json.loads(args.snapshot.read_text())
         service_meta = next(va for va, names in exports.items() if '__ZN9IOService10gMetaClassE' in names)
-        actual = bytes.fromhex(d['memory'].get(f'{meta:x}:50', ''))
-        service = bytes.fromhex(d['memory'].get(f'{service_meta:x}:50', ''))
+        actual = bytes.fromhex(d['memory'].get(f'{meta + slide:x}:50', ''))
+        service = bytes.fromhex(d['memory'].get(f'{service_meta + slide:x}:50', ''))
         if (len(actual) == 0x50 and len(service) == 0x50 and
                 struct.unpack_from('<Q', actual, 16)[0] == service_meta and
                 struct.unpack_from('<I', actual, 32)[0] == CLASS_SIZE and

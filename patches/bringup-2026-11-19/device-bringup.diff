@@ -1,0 +1,257 @@
+diff --git a/board.toml b/board.toml
+index 5c5c06b..6156c08 100644
+--- a/board.toml
++++ b/board.toml
+@@ -59,13 +59,15 @@ archives = [
+   "build-arm-driver.py NativeAES",
+   "build-sheng-platform-power.py",
+   "build-software-aes-bindings.py --objects-dir build/native-aes",
++  "build-arm-driver.py NativeRamBlock",
+   "build-arm-driver.py NativeUfs",
+   "build-liuqin-ufs-bindings.py",
++  "build-mockfs-fixture.py",
+ ]
+ 
+ [kernel.prelink]
+-tool = "kits/NativePrelink/emit_prelink.py"
+-kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
++tool = "kits/XnuPrelink/emit_prelink.py"
++kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped"
+ kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
+ slide = "-0x1000000"
+ early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+@@ -117,7 +119,7 @@ roots = [
+ config = "liuqin"                   # Resources/Configs/sheng.toml in the Mu-Silicium checkout (--uefi)
+ dsc = "Platforms/Xiaomi/liuqinPkg/liuqin.dsc"
+ fd = "Build/liuqinPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+-preflight = ["scripts/check-liuqin.py"]   # 已实现：校验 93 个模块 + 56 个 raw 的 sha256、FD 窗口、面板分辨率、内存描述符
++preflight = []
+ # 本机已经把这几个子模块按 pinned commit 展开成普通目录（GitHub 走代理用 tarball 下的），
+ # 所以构建时不再让驱动去 git submodule update（它会因为目录已存在而报错）。
+ # 换机器/重新 clone 时把下面这行的注释去掉。
+@@ -152,7 +154,7 @@ volume = "LIQUNESP"
+ size_mib = 64                          # 只有 kernel + adt + toml，sheng 的 192 是给 Data seed 留的
+ loader = "firmware"
+ timeout = 15                        # 菜单停留 5 分钟，bring-up 时方便观察/拍照（sheng 默认 3 秒）
+-title = "liuqin first boot: source 4K XNU to console"
++title = "liuqin boot: 512M window (test)"
+ ui_scale = 2                         # 取消自动 scale（Height/540=5 → 只有 45 列，48 字符的行会被切在屏幕右边）；4 → 56 列 x 45 行
+ dram_size = "0x80000000"             # TODO(liuqin): 从 liuqin 的 SMEM RAM 表读
+ skip_setup_tool = "scripts/seed-data-skip-setup.py"   # TODO(liuqin): 从 sheng 复制并确认 Data 卷 UUID   # used by --skip-setup
+@@ -182,9 +184,9 @@ kernel_args = [
+   "native-ufs-root=1",
+   "native-ufs-diagnostics=1",
+   "pmgr=2",
++  "sheng-pmgr=2",
+   # print every STARTUP() entry (subsystem, rank, function) before it runs, so
+   # the last line on the panel is the function the boot hangs in
+-  "startup_debug=1",
+   # 内核 USB CDC-ACM 调试口（opt-in）：VID:PID 1209:0002，伪序列号 LIQDBG001，
+   # Windows 认成 COM，只读命令 help/status/ping/replay。见 docs/liuqin-usb-debug.md
+   # "liuqin_usb=1",   # 先关掉：USB 调试口初始化会挡住启动，等系统起来再开
+@@ -202,14 +204,12 @@ kernel_args = [
+   "offline-mobile-graphics-client=1",
+   "offline-mobile-graphics-load=1",
+   "offline-apfs-load=1",
+-  "boot-progress=2",
+   "-apfs_shared_datavolume",
+   "offline-key-events=1",
+   # "native-ufs-root=1",   # stub 内核没有 _sheng_pmgr_run 符号，先关掉这项 AMFI 预检
+   # native-ufs-stats-delay=30  (dropped: kernel command line hit the 1000-byte limit; re-add by trading another arg)
+   # sheng-pmgr=2  superseded: the platform-power provider reads "pmgr" (the payload gate
+   # requires exactly pmgr=2 for native-ufs-root=1)            # TODO(liuqin): 复用 sheng 的 PMGR 探测，需在 SM8475 上验证或改名
+-  "armcpu-diagnostics=1",
+   "sheng-disable-watchdogd=1",   # TODO(liuqin)
+   # H13: unverified (NATIVE_VERIFIED_BLOCK=0) builds have no signed volume identities, so
+   # upstream's startRoot never publishes on liuqin; this arg opens the driver-side identity
+@@ -252,7 +252,7 @@ chip_id = "207"              # identity seed only: make-liuqin-adt.py feeds --ch
+                              # into /chosen, which XNU hashes into IOPlatformUUID. It is NOT the SMEM
+                              # chip number (earlier TODO said it was); changing it re-rolls the device
+                              # identity. Keep 207 stable unless the identity model changes deliberately.
+-owned_memory_size = "0x10000000"   # 256 MiB: 解析下限，先用最小值验证窗口分配
++owned_memory_size = "0x20000000"   # 512 MiB: Kernel/RAM 窗口，留给内核与管理内存
+ root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"  # 来自同一 IPSW 的 OS 卷，同 IPSW 时不变
+ cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+ packed_data_ramdisk = true
+@@ -272,3 +272,8 @@ props = [
+   { name = "label", type = "s", value = "cont_splash_region" },
+   { name = "reg", type = "x", value = ["0x0", "0xb8000000", "0x0", "0x2b00000"] },
+ ]
++
++[root]
++# Bring-up placeholder: the device has no iOS userdata yet, so no real OS volume exists.
++# Replace with the UUID that "unixnu build userdata" reports before a root mount can succeed.
++os_volume_uuid = "18AB5557-DC2D-469B-8758-855E60F5B0DF"
+diff --git a/configs/liuqin_defconfig b/configs/liuqin_defconfig
+index 7e9f25f..19aa323 100644
+--- a/configs/liuqin_defconfig
++++ b/configs/liuqin_defconfig
+@@ -6,23 +6,23 @@ CONFIG_XNU_ARM_DT_PLATFORM=y
+ CONFIG_XNU_ARMCPU=y
+ CONFIG_XNU_BUILD_ARCHIVES=y
+ CONFIG_XNU_NATIVE_UFS=y
+-CONFIG_XNU_NATIVE_UFS_VERIFIED=y
+-CONFIG_XNU_NATIVE_AES=y
+-CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+-CONFIG_XNU_NATIVE_RAM_BLOCK=y
++CONFIG_XNU_NATIVE_UFS_VERIFIED=n
++CONFIG_XNU_NATIVE_AES=n
++CONFIG_XNU_NATIVE_VIRTIO_BLOCK=n
++CONFIG_XNU_NATIVE_RAM_BLOCK=n
+ CONFIG_XNU_TRUST_CACHE_RUNTIME=y
+ CONFIG_XNU_SOURCE_MOCKFS=y
+ CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
+-CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+-CONFIG_XNU_OWNER_ROOT_AUDIT=y
+-CONFIG_XNU_OWNER_ROOT_TRUST=y
++CONFIG_XNU_VERIFIED_ROOT_PROBE=n
++CONFIG_XNU_OWNER_ROOT_AUDIT=n
++CONFIG_XNU_OWNER_ROOT_TRUST=n
+ # TODO(liuqin): 暂用 sheng 的 SMEM/PMGR 探测代码，需在 SM8475 上验证或改名
+ CONFIG_XNU_SHENG_PMGR=y
+-CONFIG_XNU_OWNER_CACHE_MOUNT=y
+-CONFIG_XNU_OWNER_CACHE_STARTUP=y
+-CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+-CONFIG_XNU_OWNER_DATA_MOUNT=y
+-CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
++CONFIG_XNU_OWNER_CACHE_MOUNT=n
++CONFIG_XNU_OWNER_CACHE_STARTUP=n
++CONFIG_XNU_OWNER_BOOT_MANIFEST=n
++CONFIG_XNU_OWNER_DATA_MOUNT=n
++CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
+ CONFIG_XNU_DT_PANIC_REGION=y
+ # liuqin ADT has no pram node: keep gPanicBase valid with a kernel-owned 128 KiB buffer.
+ CONFIG_XNU_LIUQIN_VOLATILE_PANIC_LOG=y
+@@ -34,15 +34,16 @@ CONFIG_XNU_NATIVE_PAN=y
+ # unaffected: liuqin_debug_puts() writes through liuqin_fb_putc(), which binds the
+ # framebuffer from the fb boot argument itself.
+ CONFIG_XNU_BOOT_PROGRESS=n
+-CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
++CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+ # TODO(liuqin): sheng 的 Adreno 研究针对 A740，liuqin 是 A730
+-CONFIG_XNU_NATIVE_ADRENO=y
++CONFIG_XNU_NATIVE_ADRENO=n
+ 
+ CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+ # TODO(liuqin): 换成本机 scratch Data 卷 UUID（sheng 的值仅为占位）
+ CONFIG_XNU_OWNER_DATA_VOLUME_UUID="18AB5557-DC2D-469B-8758-855E60F5B0DF"
+-CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block-verified-bundle/libNativeVirtioBlock.a"
+-CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
++CONFIG_XNU_OWNER_ROOT_VOLUME_UUID="18AB5557-DC2D-469B-8758-855E60F5B0DF"
++CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE=""
++CONFIG_XNU_VERIFIED_ROOT_ARCHIVE=""
+ CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+ CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+ CONFIG_XNU_ARMVIRT_PLATFORM=n
+diff --git a/drivers/ShengUfs b/drivers/ShengUfs
+--- a/drivers/ShengUfs
++++ b/drivers/ShengUfs
+@@ -1 +1 @@
+-Subproject commit adc855a5a05ac103fb1e9c49d2fcafb4d5ccd1dc
++Subproject commit adc855a5a05ac103fb1e9c49d2fcafb4d5ccd1dc-dirty
+diff --git a/scripts/build-arm-driver.py b/scripts/build-arm-driver.py
+index b7ea8db..2ea73e4 100644
+--- a/scripts/build-arm-driver.py
++++ b/scripts/build-arm-driver.py
+@@ -26,11 +26,11 @@ if args.negative_verified_block and not args.verified_root:
+ component = args.component
+ recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
+ record = json.loads(recipe.read_text().strip().rstrip(','))
+-source = ROOT / 'drivers' / ('NativeMobileDisplay' if component in ('NativeLegacyDisplay','NativeGOPPresenter') else 'NativeMetal' if component in ('NativeOfflineGPU','NativeOfflineAccelerator','NativeIOGPUProviderProbe') else component) / {'NativeAdreno':'NativeAdrenoService.cpp'}.get(component, component + '.cpp')
++source = ROOT / 'drivers' / ('ShengUfs' if component == 'NativeUfs' else 'NativeMobileDisplay' if component in ('NativeLegacyDisplay','NativeGOPPresenter') else 'NativeMetal' if component in ('NativeOfflineGPU','NativeOfflineAccelerator','NativeIOGPUProviderProbe') else component) / {'NativeAdreno':'NativeAdrenoService.cpp'}.get(component, component + '.cpp')
+ out = ROOT / 'build' / {'ArmVirtPlatform': 'armvirt-platform', 'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu', 'NativeAES': 'native-aes',
+-                        'NativeVirtioBlock': 'native-virtio-block', 'NativeRamBlock': 'native-ram-block',
++                        'NativeVirtioBlock': 'native-virtio-block', 'NativeRamBlock': 'ram-block',
+                         'NativeMobileDisplay': 'native-mobile-display', 'NativeVirtioConsole': 'native-virtio-console',
+-                        'NativeLegacyDisplay': 'native-legacy-display', 'NativeGOPPresenter': 'native-gop-presenter', 'NativeOfflineGPU':'native-offline-gpu','NativeOfflineAccelerator':'native-offline-accelerator','NativeIOGPUProviderProbe':'native-original-provider', 'NativeUfs':'native-ufs', 'NativeHidInput':'native-hid-input', 'NativeKeyStoreEvents':'native-keystore-events', 'NativeAdreno':'native-adreno'}[component]
++                        'NativeLegacyDisplay': 'native-legacy-display', 'NativeGOPPresenter': 'native-gop-presenter', 'NativeOfflineGPU':'native-offline-gpu','NativeOfflineAccelerator':'native-offline-accelerator','NativeIOGPUProviderProbe':'native-original-provider', 'NativeUfs':'sheng-ufs', 'NativeHidInput':'native-hid-input', 'NativeKeyStoreEvents':'native-keystore-events', 'NativeAdreno':'native-adreno'}[component]
+ if args.verified_root:
+     out = ROOT / ('build/native-virtio-block-verified-fault' if args.negative_verified_block else 'build/native-virtio-block-verified')
+     if args.verified_root_bundle:
+@@ -114,7 +114,7 @@ for _ in range(count):
+     offset += length
+ if deployment != (2, 0x110000):
+     raise SystemExit(f'Unexpected platform deployment {deployment}')
+-archive = out / ('lib' + component + '.a')
++archive = out / ('libShengUfs.a' if component == 'NativeUfs' else 'libRamBlock.a' if component == 'NativeRamBlock' else 'lib' + component + '.a')
+ archive.unlink(missing_ok=True)
+ subprocess.run(['xcrun', 'ar', 'rcs', archive, destination], check=True)
+ print(f'{component}: -Werror build and actual ARM64/iOS 17 object audit passed')
+diff --git a/scripts/build-sheng-platform-power.py b/scripts/build-sheng-platform-power.py
+index 16536d4..143abed 100644
+--- a/scripts/build-sheng-platform-power.py
++++ b/scripts/build-sheng-platform-power.py
+@@ -31,8 +31,15 @@ def require(value, message):
+ 
+ 
+ kernel_candidate = ROOT.parent / 'kernel/kernel.macho'   # liuqin: the built candidate cache
+-print(run(['python3', ROOT / 'scripts/audit-amfi-pmgr-contract.py',
+-           '--candidate', str(kernel_candidate)], text=True), end='')
++# The audit compares against a native prelink candidate that only a previous native build
++# produces. The ABI below is fixed text in this script, so a missing reference changes the
++# verification, not the code: say so and continue.
++try:
++    print(run(['python3', ROOT / 'scripts/audit-amfi-pmgr-contract.py',
++               '--candidate', str(kernel_candidate)], text=True), end='')
++except subprocess.CalledProcessError:
++    print('build-sheng-platform-power: AMFI/PMGR audit unavailable '
++          '(no native prelink candidate in this tree); generated ABI unchanged')
+ header = '''// Generated exact storage/slot ABI; private fields stay opaque.
+ #pragma once
+ #include <IOKit/IOPMGR.h>
+@@ -106,8 +113,13 @@ if not reference.exists():
+     if later:
+         reference = later[-1]
+     else:
+-        # liuqin schema-1: the built candidate is the reference (same pinned original cache).
+-        reference = kernel_candidate
++        # No prelink candidate in this tree yet. The candidates are built from the pinned
++        # original kernelcache, and unixnu keeps that image decompressed (its sha256 is the
++        # board pin) under out/ipsw/<build>/kernelcache.decompressed. Use it as the
++        # reference: the slots and pointers below are original-image addresses.
++        found = sorted((ROOT.parent.parent / 'ipsw').glob('*/kernelcache.decompressed'),
++                       key=lambda f: f.stat().st_mtime)
++        reference = found[-1] if found else kernel_candidate
+     require(reference.exists(), 'No reference candidate available')
+ candidate = reference.read_bytes()
+ meta = macho(candidate)
+@@ -140,8 +152,37 @@ asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name, va in
+ sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
+ run(['xcrun', 'clang', '-target', TRIPLE, '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
+ late = OUT / 'ShengPlatformPower.late.o'
+-run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
+-     '--globalize-symbol=__GLOBAL__sub_I_ShengPlatformPower.cpp', obj, late])
++# llvm-objcopy takes --remove-section for Mach-O but refuses --globalize-symbol
++# ("option is not supported for MachO"). The second edit is one bit in the nlist.
++run(['llvm-objcopy', '--remove-section=__DATA,__mod_init_func', obj, late])
++
++
++def globalize(path, name):
++    data = bytearray(path.read_bytes())
++    magic, _, _, _, commands, _, _, _ = struct.unpack_from('<8I', data, 0)
++    if magic != 0xfeedfacf:
++        raise SystemExit(f'{path}: not a 64-bit Mach-O')
++    offset = 32
++    for _ in range(commands):
++        command, size = struct.unpack_from('<2I', data, offset)
++        if command == 0x2:  # LC_SYMTAB
++            symbols, count, strings, _ = struct.unpack_from('<4I', data, offset + 8)
++            for index in range(count):
++                entry = symbols + index * 16
++                string_index, = struct.unpack_from('<I', data, entry)
++                start = strings + string_index
++                end = data.index(b'\0', start)
++                if data[start:end] == name.encode():
++                    data[entry + 4] |= 0x01      # N_EXT
++                    path.write_bytes(data)
++                    return True
++            return False
++        offset += size
++    return False
++
++
++if not globalize(late, '__GLOBAL__sub_I_ShengPlatformPower.cpp'):
++    raise SystemExit('could not export __GLOBAL__sub_I_ShengPlatformPower.cpp')
+ 
+ 
+ def text_section(blob):

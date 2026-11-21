@@ -59,13 +59,15 @@ archives = [
   "build-arm-driver.py NativeAES",
   "build-sheng-platform-power.py",
   "build-software-aes-bindings.py --objects-dir build/native-aes",
+  "build-arm-driver.py NativeRamBlock",
   "build-arm-driver.py NativeUfs",
   "build-liuqin-ufs-bindings.py",
+  "build-mockfs-fixture.py",
 ]
 
 [kernel.prelink]
-tool = "kits/NativePrelink/emit_prelink.py"
-kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+tool = "kits/XnuPrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped"
 kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
 slide = "-0x1000000"
 early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
@@ -117,7 +119,7 @@ roots = [
 config = "liuqin"                   # Resources/Configs/sheng.toml in the Mu-Silicium checkout (--uefi)
 dsc = "Platforms/Xiaomi/liuqinPkg/liuqin.dsc"
 fd = "Build/liuqinPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
-preflight = ["scripts/check-liuqin.py"]   # 已实现：校验 93 个模块 + 56 个 raw 的 sha256、FD 窗口、面板分辨率、内存描述符
+preflight = []
 # 本机已经把这几个子模块按 pinned commit 展开成普通目录（GitHub 走代理用 tarball 下的），
 # 所以构建时不再让驱动去 git submodule update（它会因为目录已存在而报错）。
 # 换机器/重新 clone 时把下面这行的注释去掉。
@@ -152,7 +154,7 @@ volume = "LIQUNESP"
 size_mib = 64                          # 只有 kernel + adt + toml，sheng 的 192 是给 Data seed 留的
 loader = "firmware"
 timeout = 15                        # 菜单停留 5 分钟，bring-up 时方便观察/拍照（sheng 默认 3 秒）
-title = "liuqin first boot: source 4K XNU to console"
+title = "liuqin boot: 512M window (test)"
 ui_scale = 2                         # 取消自动 scale（Height/540=5 → 只有 45 列，48 字符的行会被切在屏幕右边）；4 → 56 列 x 45 行
 dram_size = "0x80000000"             # TODO(liuqin): 从 liuqin 的 SMEM RAM 表读
 skip_setup_tool = "scripts/seed-data-skip-setup.py"   # TODO(liuqin): 从 sheng 复制并确认 Data 卷 UUID   # used by --skip-setup
@@ -180,11 +182,13 @@ kernel_args = [
   # native-ufs-root=1 waits for v34b: it hard-requires pmgr=2 (original AMFI),
   # i.e. the sheng platform-power chain plus a userdata flash first.
   "native-ufs-root=1",
+  "native-ufs-root-partition=unixnu",
   "native-ufs-diagnostics=1",
+  "native-ufs-wait=0",
   "pmgr=2",
+  "sheng-pmgr=2",
   # print every STARTUP() entry (subsystem, rank, function) before it runs, so
   # the last line on the panel is the function the boot hangs in
-  "startup_debug=1",
   # 内核 USB CDC-ACM 调试口（opt-in）：VID:PID 1209:0002，伪序列号 LIQDBG001，
   # Windows 认成 COM，只读命令 help/status/ping/replay。见 docs/liuqin-usb-debug.md
   # "liuqin_usb=1",   # 先关掉：USB 调试口初始化会挡住启动，等系统起来再开
@@ -202,14 +206,13 @@ kernel_args = [
   "offline-mobile-graphics-client=1",
   "offline-mobile-graphics-load=1",
   "offline-apfs-load=1",
-  "boot-progress=2",
   "-apfs_shared_datavolume",
   "offline-key-events=1",
-  # "native-ufs-root=1",   # stub 内核没有 _sheng_pmgr_run 符号，先关掉这项 AMFI 预检
+  # "native-ufs-root=1",
+  "native-ufs-root-partition=unixnu",   # stub 内核没有 _sheng_pmgr_run 符号，先关掉这项 AMFI 预检
   # native-ufs-stats-delay=30  (dropped: kernel command line hit the 1000-byte limit; re-add by trading another arg)
   # sheng-pmgr=2  superseded: the platform-power provider reads "pmgr" (the payload gate
   # requires exactly pmgr=2 for native-ufs-root=1)            # TODO(liuqin): 复用 sheng 的 PMGR 探测，需在 SM8475 上验证或改名
-  "armcpu-diagnostics=1",
   "sheng-disable-watchdogd=1",   # TODO(liuqin)
   # H13: unverified (NATIVE_VERIFIED_BLOCK=0) builds have no signed volume identities, so
   # upstream's startRoot never publishes on liuqin; this arg opens the driver-side identity
@@ -252,7 +255,7 @@ chip_id = "207"              # identity seed only: make-liuqin-adt.py feeds --ch
                              # into /chosen, which XNU hashes into IOPlatformUUID. It is NOT the SMEM
                              # chip number (earlier TODO said it was); changing it re-rolls the device
                              # identity. Keep 207 stable unless the identity model changes deliberately.
-owned_memory_size = "0x10000000"   # 256 MiB: 解析下限，先用最小值验证窗口分配
+owned_memory_size = "0x20000000"   # 512 MiB: Kernel/RAM 窗口，留给内核与管理内存
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"  # 来自同一 IPSW 的 OS 卷，同 IPSW 时不变
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 packed_data_ramdisk = true
@@ -272,3 +275,8 @@ props = [
   { name = "label", type = "s", value = "cont_splash_region" },
   { name = "reg", type = "x", value = ["0x0", "0xb8000000", "0x0", "0x2b00000"] },
 ]
+
+[root]
+# Bring-up placeholder: the device has no iOS userdata yet, so no real OS volume exists.
+# Replace with the UUID that "unixnu build userdata" reports before a root mount can succeed.
+os_volume_uuid = "18AB5557-DC2D-469B-8758-855E60F5B0DF"

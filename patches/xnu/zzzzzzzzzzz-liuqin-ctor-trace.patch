@@ -1,0 +1,27 @@
+--- a/libkern/c++/OSMetaClass.cpp
++++ b/libkern/c++/OSMetaClass.cpp
+@@ -1150,13 +1150,24 @@
+ 
+ /*********************************************************************
+ *********************************************************************/
++extern "C" void lq_journal_trace (uint32_t, uint64_t);
++
+ void
+ OSMetaClass::instanceConstructed() const
+ {
++        static int lqConstructDepth = 0;
++        if (lqConstructDepth < 512) {
++                lq_journal_trace (0x100u + (uint32_t) lqConstructDepth,
++                    ((uint64_t) (uintptr_t) this) >> 4);
++                lqConstructDepth++;
++        }
+         // if ((0 == OSIncrementAtomic(&(((OSMetaClass *) this)->instanceCount))) && superClassLink)
+         if ((0 == OSIncrementAtomic(&instanceCount)) && superClassLink) {
+                 superClassLink->instanceConstructed();
+ 	}
++        if (lqConstructDepth > 0) {
++                lqConstructDepth--;
++        }
+ }
+ 
+ /*********************************************************************

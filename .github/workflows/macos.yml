@@ -213,6 +213,28 @@ jobs:
           if [ "$SKIP_SETUP" = "true" ]; then args+=(--skip-setup); fi
           ./unixnu build payload "${args[@]}"
 
+      - name: Get the Mu-Silicium device tree
+        if: contains(inputs.steps, 'payload')
+        run: |
+          git clone --depth 1 https://github.com/hhyygg2009/uefi-liuqin.git "GITHUB_WORKSPACE/../uefi-liuqin"
+          git -C "GITHUB_WORKSPACE/../uefi-liuqin" submodule update --init --depth 1
+
+      - name: Build firmware
+        if: contains(inputs.steps, 'payload')
+        run: |
+          ./unixnu build firmware --uefi "GITHUB_WORKSPACE/../uefi-liuqin" \
+            --edk2 "GITHUB_WORKSPACE/../uefi-liuqin/Mu_Basecore"
+
+      - name: Wrap the payload and build the boot image
+        if: contains(inputs.steps, 'payload')
+        run: |
+          python3 device/scripts/wrap-payload-mbr.py \
+            out/liuqin/payload/payload.img out/liuqin/payload/payload-mbr.img
+          ./unixnu bootimg \
+            --fd "GITHUB_WORKSPACE/../uefi-liuqin/Build/liuqinPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd" \
+            --dtb "GITHUB_WORKSPACE/../uefi-liuqin/Resources/DTBs/liuqin.dtb" \
+            --ramdisk out/liuqin/payload/payload-mbr.img
+          ls -l out/liuqin/boot/ || true
       - name: Upload kernel and payload
         uses: actions/upload-artifact@v4
         with:
@@ -220,6 +242,7 @@ jobs:
           path: |
             out/*/kernel/**
             out/*/payload/**
+            out/*/boot/**
             out/*/logs/**
           if-no-files-found: error
           retention-days: 7
@@ -232,21 +255,6 @@ jobs:
           path: out/*/userdata/**
           if-no-files-found: error
           retention-days: 7
-
-      - name: Publish outputs (logs, kernel, payload)
-        if: always()
-        run: |
-          rm -rf "$RUNNER_TEMP/ci"
-          mkdir -p "$RUNNER_TEMP/ci/logs" "$RUNNER_TEMP/ci/kernel" "$RUNNER_TEMP/ci/payload"
-          cp -f out/liuqin/logs/*.log "$RUNNER_TEMP/ci/logs/" 2>/dev/null || true
-          cp -f out/liuqin/kernel/* "$RUNNER_TEMP/ci/kernel/" 2>/dev/null || true
-          cp -f out/liuqin/payload/* "$RUNNER_TEMP/ci/payload/" 2>/dev/null || true
-          cd "$RUNNER_TEMP/ci" || exit 0
-          printf 'run %s\nresult %s\n' "$GITHUB_RUN_ID" "${{ job.status }}" > MANIFEST.txt
-          git init -q .
-          git -c user.email=ci@local -c user.name=ci add -A
-          git -c user.email=ci@local -c user.name=ci commit -qm "outputs of run $GITHUB_RUN_ID"
-          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/ci-out
 
       - name: Upload build logs
         if: always()
