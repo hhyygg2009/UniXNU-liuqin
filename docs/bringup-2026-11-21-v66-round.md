@@ -27,8 +27,10 @@ boot 之后主机侧 USB 完全看不到设备（`18d1:d00d` 不再枚举），�
 1. **开机的就是这份内核。** 屏上版本串
    `Darwin Kernel Version 23.6.0: Sat Nov 21 09:22:28 CST 2026; hhyygg:ios-obj/DEVELOPMENT_ARM64_BCM2837`
    与 `out/liuqin/kernel/kernel.macho`（51,200,000 B，sha256 `b91c756729611065…`）里的 `@(#)VERSION` 逐字相同。
-   ⚠️ 但 stamp 是 09:22，而 `kernel.macho`/`payload.img`/镜像的 mtime 都是 17:10 —— 17:10 那次要么只重打包、
-   要么 `VERSION` 没再生成。这一条待确认（见"下一步 4"）。
+   stamp 是 09:22 而产物 mtime 是 17:10，一开始像"只重打包"；`out/liuqin/logs` 否掉了这个猜测 ——
+   `archive-01..12`（17:09–17:10）、`kernel.log` 17:10:26、`prelink.log` 17:10:31、`payload-adt.log`
+   17:10:33 都在，**内核确实重编了**，只是 `@(#)VERSION` 串不随每次构建重新生成。
+   所以"面板串 == 内核串"只证明镜像里是这份内核，不能用来推构建次数；构建次数看 logs 目录。
 2. **H17 没有复现。** 整屏没有 `Taking non-sleepable RW lock … @lock_rw.c:1400`。
    上一堵墙（launchd exec 时的 trust-cache 锁）在这轮没有再挡路。
 3. **H16 绊线健康。** `NativeUfs: M:reg pre p=0xfffffff007ac36b0 link=0xfffffff006add1d0` 出现 3 次，
