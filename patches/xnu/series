@@ -1,70 +1,20 @@
-# Ordered XNU patch series for liuqin (SM8475).
+# device:patches/xnu/series —— liuqin 独有的 XNU 补丁（schema 2）。
 #
-# One patch per line, applied top to bottom; `#` starts a comment; relative paths resolve
-# from this directory (unixnu.com/zh/porting/device-repository#有序配置和补丁).
+# 迁移前本仓有 60 个顶层补丁，其中 46 个与 UniXNU 的 arch/os profile 逐字节相同：
+# schema 1 解析不了 profile 根，所以它们被复制进了设备仓。schema 2 之后由
+# [kernel] patch_series 的 arch:/os: 条目提供，设备侧删除副本 —— 同一补丁出现两次
+# 会让 plan() 直接报 "patch appears twice in the selected series"。
 #
-# This file is generated-from, not invented: it lists exactly the 60 top-level *.patch files
-# that the schema-1 build applies today, in the name order `build-xnu-4k-baseline.sh` replays
-# them in. Keeping the declaration here is what makes the order reviewable; the schema-2
-# migration ([kernel] patch_series = ["device:patches/xnu/series"]) is the remaining step and
-# is tracked in porting.toml.
+# 下面 14 条是设备侧真正独有的。其中 4 条与上游同名但内容不同（设备改过）：
+# 上游那份由 arch/os series 先套，本仓这份必须重新基化成"相对上游版本的增量"，
+# 否则第二个 git apply 会失败。这一步还没做，见文件末尾 TODO。
 #
-# NOTE the trap this documents: with UNIXNU_PATCH_LIST set (our build recipe exports
-# `UNIXNU_PATCH_LIST=manual`), build-xnu-4k-baseline.sh skips its own stamp/replay block
-# entirely (line 52), so editing a patch here has NO effect until the series is resolved by
-# the builder. That is one of the reasons to finish the schema-2 migration.
-
-apple-only-cpu-tunables.patch
-architectural-timer-entry.patch
-armvirt-platform-personality.patch
-cxx-flag-dependencies.patch
-disabled-deferred-reclaim.patch
-external-archive-dependencies.patch
-kernel-sdk-root.patch
-local-availability.patch
-mockfs-intermediate-lookup.patch
-mockfs-memory-device-width.patch
-mockfs-statfs.patch
-mockfs-test-file.patch
-mockfs-typed-allocation.patch
-native-4k-bootstrap-capacity.patch
+# 顺序即应用顺序（按名字排序，与 build-xnu-4k-baseline.sh 的重放一致）。
 native-4k-signature-hash-cache.patch
-native-4k-user-abi.patch
-native-aes-personality.patch
-native-arm-pan.patch
-native-dt-panic-region.patch
-native-priv-work-interval.patch
-native-quiet-managed-page-report.patch
 native-smp-secondary.patch
-native-text-fixup.patch
-native-trust-cache-runtime.patch
-native-union-getattrlistbulk.patch
 native-volatile-panic-region-liuqin.patch
-native-work-interval-soft-fail.patch
-native-work-interval-trace.patch
-non-apple-cache-monitor.patch
-non-apple-iommu-bootstrap.patch
-non-apple-pmap-field.patch
-null-root-media.patch
 offline-component-load-probes.patch
-offline-legacy-start.patch
-offline-native-gpu-broker.patch
-offline-owner-boot-manifest.patch
-offline-owner-cache-carrier.patch
-offline-owner-root-binding-audit.patch
-offline-owner-root-crypto-probe.patch
-offline-owner-systemos-mount.patch
-offline-owner-z-air-init.patch
-offline-pgz-alignment-probe.patch
-pgz-aligned-validation.patch
-public-entitlements-header.patch
-published-freezer-condition.patch
 sheng-platform-power.patch
-source-corecrypto14-bootstrap.patch
-source-machine-layer.patch
-source-pthread-bootstrap.patch
-zzw-native-adreno-sandbox-grant.patch
-zzx-pmap-sync-64bit-pa.patch
 zzy-native-gpu-addon-mount.patch
 zzy-staged-system-apps.patch
 zzz-boot-progress.patch
@@ -74,3 +24,9 @@ zzz-liuqin-usb-debug4.patch
 zzz-liuqin-usb-debug5.patch
 zzzzzzzzz-liuqin-development-root-policy.patch
 zzzzzzzzzzz-liuqin-ctor-trace.patch
+
+# TODO(schema2 rebase) 同名不同内容的 4 条：
+#   native-4k-signature-hash-cache.patch
+#   offline-component-load-probes.patch
+#   zzy-native-gpu-addon-mount.patch
+#   zzy-staged-system-apps.patch

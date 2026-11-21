@@ -1,3 +1,8 @@
+schema_version = 2
+# schema 2：配置层 = UniXNU/profiles/arch/arm64 → SoC soc.toml（SM8475 目前没有共享 SoC 仓，
+# 见下方 [components] 的说明）→ profiles/os/<os_profile> → 本文件。表按键合并、数组替换。
+# 最终取值用 `unixnu status --json` 查看；输出根会变成 out/<device>/<os_profile>/<config>/。
+
 # Board description of the Xiaomi Pad 6 Pro (liuqin, SM8475), read by the unixnu build driver.
 #
 # PORTED FROM UniXNU-sheng. Every value that is board dependent is marked TODO(liuqin) and
@@ -12,6 +17,27 @@ kit = "liuqin"                      # the package/ of this repository appears as
 
 # The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
 # it the remote url is read with range requests, only the members that are needed.
+# ---------------------------------------------------------------------------
+# 组件与设备树
+# ---------------------------------------------------------------------------
+[components]
+# liuqin 只从上游选 XnuPrelink —— [kernel.prelink] tool 指向 kits/XnuPrelink/emit_prelink.py，
+# 那是唯一真正由组件提供的东西。其余**故意不选**，理由是事实不是偷懒：
+#   * SM8475 没有共享 SoC 仓（UniXNU 组织里只有 UniXNU-sm8550-common），所以 board.soc_source
+#     留空，SM8475 的板级输入仍在设备仓与固件仓里；
+#   * UFS 驱动用的是本设备 fork（Fly116/ShengUfs@liuqin-sm8475-v56，gitlink 26ae865e…），
+#     选上游 ShengUfs 会把 fork 换成上游版本，等于丢掉 §3.5/§3.7 这条链上的全部修复；
+#   * GPU/触控/音频（Adreno 730、NT36532）尚未按上游组件形态上过机，选进来只会让 status 里
+#     多出一堆没有证据的组件。
+# 每选一个组件，porting.toml 必须有对应区域并给出实机证据（completion 第 7 组）。
+include = ["XnuPrelink"]
+
+[device_tree]
+source = "device:dts/liuqin.dts"
+# include_dirs 留空：没有 SoC 仓可引。dts/liuqin.dts 是厂商 DTB 的 dtc 反编译视图，
+# 权威输入仍是 [firmware] 产出的 liuqin.dtb（哈希钉在 proprietary-files.txt）。
+# 迁移必须验证"由本 DTS 编出的 DTB 与现用的 liuqin.dtb 等价"，否则 bootimg 会换设备树。
+
 [ipsw]
 url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
 product = "iPad7,1"
@@ -46,6 +72,10 @@ windows = [
 
 [kernel]
 defconfig = "liuqin_defconfig"
+# 有序补丁系列（completion 第 3 组）。schema 1 时代设备仓复制了 46 个上游补丁；
+# schema 2 由 profile 根提供，设备侧只留 14 条独有项，见 patches/xnu/series 的说明与 TODO。
+patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+config_fragments = ["arch:configs/common.config", "os:configs/ipados.config"]
 # Archive builders of the kernel step, in order: unixnu runs them between the
 # bootstrap pass and the real link. Trimmed to what liuqin_boot_defconfig enables:
 # source corecrypto (prelink closure), the Apple-format device-tree platform expert
