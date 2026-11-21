@@ -40,6 +40,10 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   退回普通形式；③ **留下的必须是绊线**：`liuqinChainDepth` + `liuqinMetaclassWitness`（只报告、
   不修、不搜）+ base-class gate，因为 `superClassLink` 全 XNU 只有 `OSMetaClass` 构造函数会写，
   绑定哪天再错它第一个开口。**给已删除的代码做仿真等于证明空气**——simtest 的场景随之换对象。
+  ④ **里程碑叠加层本身也要能关**：`liuqin_milestone` 用 `liuqin_debug_puts` 绕过控制台层直接写
+  framebuffer（它自己的注释写着 "the panel scrolls whole pages"）。文本控制台一旦可用
+  （`K17:console_init` 之后，`debug=0x14e`），两套写入落在同一片区域，照片就是一屏重影。
+  v65 起 `startup.c` 的门读 `liuqin-milestone`（默认 1，别的板子不受影响），liuqin 传 `=0`。
 - **1 MiB 控制台镜像只包含 `liuqin_debug_puts/putc` 写的字节**（`liuqin_debug_append` 的全部
   调用点就这两处）。普通 `kprintf/printf` **不进镜像**，而补丁里有 `printf("LIUQIN USB: …=%08x…")`
   这类 8 位十六进制打印。所以 `M:fp … ring clean` 只能排除"我们自己里程碑流的复制"，
@@ -104,6 +108,26 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   **已收口（2026-11-19）**：`board.toml` 现在声明实际生效的 `liuqin_boot_defconfig`，`scripts/check-defconfig.py`
   证明"声明 = `out/state.json` 选定 = `.config` 字节"三者一致；换 defconfig 必须同时跑 `unixnu defconfig`，
   否则这条守卫就是红的。
+
+- **`UNIXNU_PATCH_LIST` 只要非空，补丁改动就全部失效。** `build-xnu-4k-baseline.sh:52` 把
+  戳计算与重放整段包在 `if [ -z "${UNIXNU_PATCH_LIST:-}" ]` 里；戳 = `xnu-work` 的 HEAD +
+  每个 `patches/xnu/*.patch` 与 `kits/XnuPrelink/patches/*.patch` 的 sha256。我们的配方曾
+  `export UNIXNU_PATCH_LIST=manual`，结果**连续两轮构建产出与上一轮逐字节相同的
+  `kernel.macho`**（删掉的补丁还在、新加的门没进去），而日志一切正常。两条规矩：
+  ① 动过补丁前先零风险算一遍戳对比 `xnu-work/.patches.sha256`，别靠构建去试；
+  ② 重放会 `git reset --hard` + `clean -fdq`，**把 `patches/xnu/manual/` 生成器的产物一起冲掉**
+  （D1 的 `liuqin_dump_waiting_threads` / `liuqin_iokit_job_counts` 不在补丁序列里），
+  所以重放后必须补做 manual 步骤再链接，否则报 `Undefined symbols`——
+  这不是绑定坏了，是树被重置了。回滚手段：`build/xnu-work.v63-state.patch` 是整棵树
+  补丁态的快照（HEAD `d8b8029` + 193,912 B diff），`reset --hard` 后 `git apply` 即可复原。
+- **`unixnu` 会记住你给过的 `-D` 设备仓。** `config.py:120` 的解析顺序是
+  `args.device → $UNIXNU_DEVICE → state['device']`，注释写着 "it is remembered afterwards"。
+  于是跑一次 `unixnu fetch -D <另一个克隆>`（比如为了跑记录检查）之后，**所有不带 `-D` 的构建
+  都换到了那个克隆**——日志里 `== submodules …` 那行换了路径，而它的 `.cache/firmware` 是空的。
+  规矩：构建脚本必须显式 `export UNIXNU_DEVICE=<路径>`，不依赖被记住的状态。
+- **`pkill -f "<命令名>"` 会杀掉执行它的这个 shell 自己**（命令行里含同样的字符串）。
+  本项目长构建多，症状是重试分支被截成 `rc=143`（SIGTERM），看起来像构建失败。
+  要么用 `pgrep` 先确认 PID 再按 PID 杀，要么写成正则不匹配自身的形式（`[u]nixnu build`）。
 
 ## 记录与检查
 
