@@ -68,13 +68,13 @@ MUST_HAVE_STRINGS = [
     b'NativeUfs: metaclass chain broken at %s: bad=%p link=%p depth=%d',
     b'NativeUfs: base class IOBlockStorageDevice live size %u, compiled size %u',
     b'NativeUfs: IOBlockStorageDevice is held by %p, not by the compiled family object %p',
-    b'trust_cache_lock_init',                       # the H17 #else branch's own bootstrap log
     b'unable to query trust caches: amfi interface not available',
 ]
 MUST_NOT_HAVE_STRINGS = [
+    b'trust_cache_lock_init',          # 2026-11-21: H17 走的是 runtime 路线（CONFIG_XNU_TRUST_CACHE_RUNTIME=y），#else 分支不该再编进来；与 check-trust-cache-image.py 的 K- 同一判据
     b'M:fp ',                    # H16-G fingerprint
     b'M:alien ',                 # H16-H arithmetic report
-    b'M:stalled',                # H16-E scan
+    b'M:stalled',                # H16-E scan (patch deleted 2026-11-21: H16 is closed by the bindings fix)
     b'M:scan done',              # H16-E summary
     b'M:bad[',                   # H16-E per-slot naming
     b'M:dirty[',                 # H16-E dirty-slot guard

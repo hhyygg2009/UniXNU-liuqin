@@ -2195,7 +2195,7 @@ diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index 8a82186..c838cc3 100644
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -219,10 +219,39 @@ extern int serverperfmode;
+@@ -219,10 +219,54 @@ extern int serverperfmode;
  
  TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
  
@@ -2204,6 +2204,21 @@ index 8a82186..c838cc3 100644
 +void
 +liuqin_milestone(const char *tag, const char *msg)
 +{
++	/* liuqin: the panel scrolls whole pages and this trace writes the framebuffer
++	 * directly, bypassing the console layer. Once the text console works (debug=0x14e)
++	 * the two collide, so the trace is opt-out: `liuqin-milestone=0` silences it. Default
++	 * is unchanged (on) for every other board. */
++	static int liuqin_panel_on = 1;
++	static int liuqin_panel_checked = 0;
++	if (!liuqin_panel_checked) {
++		unsigned v = 1;
++		PE_parse_boot_argn("liuqin-milestone", &v, sizeof (v));
++		liuqin_panel_on = (v != 0);
++		liuqin_panel_checked = 1;
++	}
++	if (!liuqin_panel_on) {
++		return;
++	}
 +	extern void liuqin_debug_puts(const char *s);
 +	extern void liuqin_debug_putc(char c);
 +	static unsigned count;

@@ -153,7 +153,7 @@ BUILDID_STRING = "liuqin-research"
 volume = "LIQUNESP"
 size_mib = 64                          # 只有 kernel + adt + toml，sheng 的 192 是给 Data seed 留的
 loader = "firmware"
-timeout = 15                        # 菜单停留 5 分钟，bring-up 时方便观察/拍照（sheng 默认 3 秒）
+timeout = 3                           # 2026-11-21: 按"没用的话缩短时间"改回 sheng 默认（15 s 是 H16 期间留的，实机每轮白等 12 秒）
 title = "liuqin boot: 512M window (test)"
 ui_scale = 2                         # 取消自动 scale（Height/540=5 → 只有 45 列，48 字符的行会被切在屏幕右边）；4 → 56 列 x 45 行
 dram_size = "0x80000000"             # TODO(liuqin): 从 liuqin 的 SMEM RAM 表读
@@ -183,7 +183,8 @@ kernel_args = [
   # i.e. the sheng platform-power chain plus a userdata flash first.
   "native-ufs-root=1",
   "native-ufs-root-partition=unixnu",
-  "native-ufs-diagnostics=1",
+  "native-ufs-diagnostics=0",   # 2026-11-21: 只多读 HC/SMMU 寄存器给 panic 页用；U* 里程碑不受影响，本轮不需要
+  "liuqin-milestone=0",           # 关掉面板里程碑叠加层：文本控制台已可用，两者写在同一片 framebuffer 上会互相压字
   "native-ufs-wait=0",
   "pmgr=2",
   "sheng-pmgr=2",
