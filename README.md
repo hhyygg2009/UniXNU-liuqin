@@ -292,7 +292,7 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 | 已发布提交的 `Porting record` 检查通过 | ✅ 本轮改掉指向子模块的证据引用之后变绿（见上表那一行）；`--base` 的增量检查同样过 |
 | `board.toml` 用 `schema_version = 2`，记录用 `schema_version = 1` | 🟡 记录 = 1 ✓；board 还是 1（`soc_source` 还没选定，也没做端到端复验）→ 目录按**格式 1** 收录：`UniXNU/devices.toml` 里本仓是 `liuqin-hhyygg2009 / format = 1 / legacy_page = "link"`，[机型页](https://unixnu.com/zh/devices/models/liuqin) 这一行只有"仓库链接"，没有生成的设备页。收录逻辑是 `format = 2 if board.schema_version == 2 else 1`，所以载体选定 + 复验之前翻不过去 |
 | README 有职责、依赖、构建入口和记录链接；`AGENTS.md` 指向同一必读 | ✅ 见上一节；`AGENTS.md` 的必读表里直接列了本节链接 |
-| 通用方法回写公共指南 | ⏳ 本轮两条（CI 不初始化子模块所以证据必须用 HTTPS permalink；schema 2 下 arch/os profile 副本与板级独有补丁的量化拆分）先落在本仓，待按硬件与 ABI 条件提 PR 到 `UniXNU` 文档 |
+| 通用方法回写公共指南 | 🟡 已成补丁待发。三条从本板踩出来的通用方法（① `Porting record` 工作流不初始化子模块 ⇒ 跨仓证据必须 HTTPS permalink 且核 blob；② 每个已跟踪非文档路径含删除都要归属某个 `[[area]]`，附自检命令；③ 组织没有该 SoC 共享仓时可用社区仓钉成 `kind = "soc"`，附载体验证三招：实测比对、dtc DTB 等价 diff、跨根同名补丁撞车清点）写在 `docs/porting/records.md` + `docs/porting/soc-support.md` 的中英两份里，补丁与 PR 正文在本工作区 `unixnu-docs/0001-records-and-soc-support-from-measured-rounds.patch`（已用 `git apply --check` 核过对当前上游 main 可用），提到上游需要 fork + PR 权限，所以这一步留给维护者点发 |
 
 扫描是每天 UTC 00:00 / 12:00（UTC+8 08:00 / 20:00）两次；手动触发与本地预览：
 
