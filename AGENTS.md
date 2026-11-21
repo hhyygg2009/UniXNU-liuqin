@@ -89,9 +89,14 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   `liuqinBaseClassFree`/`liuqin_block_super_fix`/`liuqinMetaclass*` 都在维护者的私有克隆里，
   三个公开 ShengUfs 都查不到。所以那段历史引 `docs/boot-rounds-v35-v44.md`，不要写成能点开的源码；
   要恢复可复核性就把这几条推到 fly116 或 mine 的分支上（storage 的 `next_action`）。
-- **schema 2 是"缺输入"不是"没改"。** 2026-11-21 在分支 `schema2`（`00a131d26ec1`）实测：
+- **schema 2 是"没选型 + 没复验"，不是缺输入，也不是没改。** 2026-11-21 在分支 `schema2`（`00a131d26ec1`）实测：
   `unixnu status --json` 拒绝 —— `schema_version = 2 requires [board] soc_source and os_profile`，
-  而 SM8475 上游没有共享 SoC 仓（组织里只有 `UniXNU-sm8550-common`），`soc_source` 无从指名。
+  UniXNU 组织里没有 SM8475 共享仓（只有 `UniXNU-sm8550-common`），**但社区有三个可以直接钉**：
+  `a77710178a/UniXNU-sm8475-common`（`cd36e7097899`，`soc.toml` + 两条 soc series + `dts/sm8475.dtsi`）、
+  `Emilelu/UniXNU-sm8475-common`（`c5b50c3927a5`）、`document97/UniXNU-soc-seed`（`e0030d06d78d`，
+  `migration/format2/soc-seed`；站点上另一个 liuqin 格式 2 条目钉的就是它）。所以这不是缺输入，
+  是**选型 + 复验没做**：要拿本板实测（`docs/liuqin-hardware.md`）比寄存器/中断/CPU/timer，
+  并把载体 dtsi 编出的 DTB 与厂商 `liuqin.dtb` 对比。
   同一轮还量化了补丁：60 条顶层补丁里 46 条与上游 arch/os profile 逐字节相同（schema 1 解析不了
   profile 根才复制进来的），真正的板级 series 是 14 条，另有 4 条同名不同内容要重新基化、
   schema 2 会多出 6 条上游补丁 —— **内核会变，所以必须整轮端到端复验，不能顺手把 main 翻成 2**。

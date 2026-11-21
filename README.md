@@ -273,7 +273,7 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 
 | 组 | 状态 | 证据 / 缺口 |
 |---|---|---|
-| `board.toml`、`porting.toml` | 🟡 部分 | 设备名/SoC/OS profile 一致（`os_profile = "ipados-17.7.11-21H461"` 已补，检查器硬要求）；`example` 未写 ✓。**仍是 schema 1，而且是硬阻塞不是没改**：`unixnu status --json` 自己拒绝（`schema_version = 2 requires [board] soc_source and os_profile`），而 SM8475 上游没有共享 SoC 仓可指（组织里只有 `UniXNU-sm8550-common`）—— 见 `porting.toml` configuration 的 limits/next_action 与分支 `schema2` 的实测证据 `00a131d26ec1` |
+| `board.toml`、`porting.toml` | 🟡 部分 | 设备名/SoC/OS profile 一致（`os_profile = "ipados-17.7.11-21H461"` 已补，检查器硬要求）；`example` 未写 ✓。**仍是 schema 1，而且是构建器自己拒绝不是没改**：`unixnu status --json` 报 `schema_version = 2 requires [board] soc_source and os_profile`，`soc_source` 还没选定（实测见分支 `schema2` 的 `00a131d26ec1`）。UniXNU 组织里确实没有 SM8475 共享仓（只有 `UniXNU-sm8550-common`），但社区里已经有三个可直接固定成 `kind = "soc"` 的载体：`a77710178a/UniXNU-sm8475-common`（`cd36e7097899`，带 `soc.toml` + 两条 soc series + `dts/sm8475.dtsi`）、`Emilelu/UniXNU-sm8475-common`（`c5b50c3927a5`）、`document97/UniXNU-soc-seed`（`e0030d06d78d`，`migration/format2/soc-seed`，另一家 liuqin 格式 2 条目就是钉它）—— 所以缺的是**选型 + 端到端复验**，见 `porting.toml` configuration 的 limits/next_action |
 | `feeds.toml`、`unixnu.lock`、`.gitmodules` | ✅ | `unixnu fetch` 已写入 `unixnu.lock`：8 个源码固定，其中 `xnu = d8b80295…` 与构建树 HEAD 逐字一致；驱动不在 lock 里而是由 gitlink 固定（`26ae865e…`，三方一致）。注意 fetch 会**记住** `-D` 的设备仓，构建脚本必须显式 `export UNIXNU_DEVICE`（AGENTS 已记） |
 | `configs/`、`patches/xnu/series` | 🟡 部分 | series 已按实际重放顺序声明 60 条 ✓；`kernel.defconfig = liuqin_defconfig`，但**构建真正读的 `out/liuqin/.config` 是另一份**（`liuqin_boot_defconfig`，差 11 个开关）—— 这条已由 `scripts/check-defconfig.py` 抓成 FAIL，修法见 §7 的坑 |
 | `dts/` | 🟡 部分 | `dts/liuqin.dts` 已入库（厂商 DTB 的 dtc 反编译视图，头注释写明来源与非逐字节等价）；`[device_tree] source` 这个 schema-2 键还没有 |
@@ -290,7 +290,7 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 |---|---|
 | 公开仓库 + `unixnu` GitHub topic | ✅ `gh repo edit hhyygg2009/UniXNU-liuqin --add-topic unixnu` 已生效（`repositoryTopics` = `unixnu`、`liuqin`），可在 [github.com/topics/unixnu](https://github.com/topics/unixnu) 查到 |
 | 已发布提交的 `Porting record` 检查通过 | ✅ 本轮改掉指向子模块的证据引用之后变绿（见上表那一行）；`--base` 的增量检查同样过 |
-| `board.toml` 用 `schema_version = 2`，记录用 `schema_version = 1` | 🟡 记录 = 1 ✓；board 还是 1（`soc_source` 硬阻塞）→ 目录按**格式 1** 收录：`UniXNU/devices.toml` 里本仓是 `liuqin-hhyygg2009 / format = 1 / legacy_page = "link"`，[机型页](https://unixnu.com/zh/devices/models/liuqin) 这一行只有"仓库链接"，没有生成的设备页。收录逻辑是 `format = 2 if board.schema_version == 2 else 1`，所以缺 SoC 载体这一天补不上 |
+| `board.toml` 用 `schema_version = 2`，记录用 `schema_version = 1` | 🟡 记录 = 1 ✓；board 还是 1（`soc_source` 还没选定，也没做端到端复验）→ 目录按**格式 1** 收录：`UniXNU/devices.toml` 里本仓是 `liuqin-hhyygg2009 / format = 1 / legacy_page = "link"`，[机型页](https://unixnu.com/zh/devices/models/liuqin) 这一行只有"仓库链接"，没有生成的设备页。收录逻辑是 `format = 2 if board.schema_version == 2 else 1`，所以载体选定 + 复验之前翻不过去 |
 | README 有职责、依赖、构建入口和记录链接；`AGENTS.md` 指向同一必读 | ✅ 见上一节；`AGENTS.md` 的必读表里直接列了本节链接 |
 | 通用方法回写公共指南 | ⏳ 本轮两条（CI 不初始化子模块所以证据必须用 HTTPS permalink；schema 2 下 arch/os profile 副本与板级独有补丁的量化拆分）先落在本仓，待按硬件与 ABI 条件提 PR 到 `UniXNU` 文档 |
 
@@ -303,9 +303,14 @@ python3 scripts/porting-record.py site --local liuqin=<本仓路径>  # 本地�
 
 **剩下两件事**（按代价排序）：
 
-1. **schema 2 迁移**：第一步是造 SoC 载体 —— SM8475 需要自己的 common 仓（`soc.toml` +
-   `soc:patches/xnu/series`，在 `feeds.toml` 里以 `kind = "soc"` 固定并由 `board.soc_source` 指名），
-   否则 `unixnu status` 直接拒绝（实测见分支 `schema2` 的 `00a131d26ec1`）。载体之后影响面已量化 —— 全仓 **81 处 `out/liuqin` 硬编码**分布在 12+ 文件
+1. **schema 2 迁移**：第一步是**选定** SoC 载体而不是自己造 —— 社区已有三个可直接钉成
+   `feeds.toml` 里 `kind = "soc"` 的仓：`a77710178a/UniXNU-sm8475-common`（`cd36e7097899`，
+   `soc.toml` + 两条 soc series + `dts/sm8475.dtsi` + `configs/sm8475.config`）、
+   `Emilelu/UniXNU-sm8475-common`（`c5b50c3927a5`）、`document97/UniXNU-soc-seed`
+   （`e0030d06d78d` 的 `migration/format2/soc-seed`，另一家 liuqin 格式 2 条目钉的就是它）。
+   要做的是拿 `docs/liuqin-hardware.md` 的实测值去比这三家的寄存器/中断/CPU/timer 事实，
+   再把它的 dtsi 编成 DTB 与 `proprietary-files.txt` 钉住的厂商 `liuqin.dtb` 对比；
+   没有载体 `unixnu status` 直接拒绝（实测见分支 `schema2` 的 `00a131d26ec1`）。选定之后影响面已量化 —— 全仓 **81 处 `out/liuqin` 硬编码**分布在 12+ 文件
    （含 `patches/xnu/manual/0001-*.py`、`tools/gh-build-liuqin.py`、`tests/run-host-test.sh`），
    且输出目录会变成 `out/<device>/<os_profile>/<config>/`。规范要求迁移后端到端复验
    内核/固件/payload/bootimg，所以它是一次完整构建，不是改几行。
