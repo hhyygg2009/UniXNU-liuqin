@@ -97,10 +97,27 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   `migration/format2/soc-seed`；站点上另一个 liuqin 格式 2 条目钉的就是它）。所以这不是缺输入，
   是**选型 + 复验没做**：要拿本板实测（`docs/liuqin-hardware.md`）比寄存器/中断/CPU/timer，
   并把载体 dtsi 编出的 DTB 与厂商 `liuqin.dtb` 对比。
-  同一轮还量化了补丁：60 条顶层补丁里 46 条与上游 arch/os profile 逐字节相同（schema 1 解析不了
-  profile 根才复制进来的），真正的板级 series 是 14 条，另有 4 条同名不同内容要重新基化、
-  schema 2 会多出 6 条上游补丁 —— **内核会变，所以必须整轮端到端复验，不能顺手把 main 翻成 2**。
-  后果记清楚：board 停在 1，`sync-devices` 就按 `format = 1` 收录，站点只给仓库链接、不生成设备页。
+  **2026-11-21 第三轮把这些做完了（分支 `soccarrier-trial`，`f1f6002`）**：钉
+  `document97/UniXNU-soc-seed`（`e0030d06d78d`，`feeds` 里 `path = migration/format2/soc-seed`）后
+  `unixnu status --json` **rc=0 / schema_version = 2**，`patch_order` 73（arch/os 57 + kit 2 +
+  device 14 + soc 0）；钉 `a77710178a/UniXNU-sm8475-common`（`cd36e7097899`）是 75，多一条
+  `native-smp-secondary.patch` 与板级同名不同内容 → 撞车 5 处。**载体不再是阻塞项。**
+  `dtc 1.7.2` 编译 `dts/liuqin.dts` 再反编译，与 `../uefi-liuqin/Resources/DTBs/liuqin.dtb`
+  （sha256 `ce90f88b…`）**diff 0 行**：1717/1717 节点、827 compatible、157 interrupts 全等，
+  blob 只差 22 字节（dtc 串表打包）—— 设备树等价性不用等上机。
+  **现在真正挡着的是两件事**：① 4 处同名不同内容且行区间真重叠的补丁要重基
+  （`native-4k-signature-hash-cache`→`ubc_subr.c`+`ubc_internal.h`；
+  `offline-component-load-probes`→`bsd_init.c`+`IOUserClient.cpp`；
+  `zzy-native-gpu-addon-mount`→`kern_exec.c`+3 个 bindfs 文件；
+  `zzy-staged-system-apps`→`kern_exec.c`），两边 hunk 数相同，是同一改动的分叉副本；
+  ② schema 2 多带 6 条上游补丁（`native-lookup-trace`、`native-union-lower-directory`、
+  `native-work-interval-instance`、`zzwb-native-sandbox-grant-set-properties`、
+  `zzyb-native-cryptex-os-view`、`zzyc-owner-skip-launch-constraints`），内核会变，
+  必须干净检出重建 + 上一轮机，之后才翻 main。
+  补丁账也在这轮量化清楚：60 条顶层补丁里 46 条与上游 arch/os profile 逐字节相同（schema 1 解析不了
+  profile 根才复制进来的），真正的板级 series 是 14 条。**内核会变，所以必须整轮端到端复验，
+  不能顺手把 main 翻成 2**；board 停在 1，`sync-devices` 就按 `format = 1` 收录，
+  站点只给仓库链接、不生成设备页（`format = 2 if board.schema_version == 2 else 1`）。
 - **上机前看 `out/liuqin/payload/payload.json` 的 `kernel_args`，别看镜像文件名。** `out/` 会被上一轮试验
   留在别的配置上（2026-11-19 那一晚它就停在 `test-pr1` 的 payload，参数里连 `amfi_get_out_of_my_way` 都没有），
   而 `releases/*.img` 才是发出去的那个。抓它的正是 `audit-h16f-image.py` 的 `Y` 段。
@@ -158,6 +175,23 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   要么用 `pgrep` 先确认 PID 再按 PID 杀，要么写成正则不匹配自身的形式（`[u]nixnu build`）。
 
 ## 记录与检查
+
+- **每个代码路径都要归属某个 `[[area]]`；漏了平时看不出来，一改就红。** `paths` 里少了
+  `feeds.toml`、`unixnu.lock`、`local.toml.example`、`proprietary-files.txt`、`dts/**`、
+  `stubs/**`、`tests/run-host-test.sh` 时结构检查照过；等这轮真去改 `feeds.toml`，
+  `check --base` 立刻报 `feeds.toml: add its owner area and paths to porting.toml`。
+  自检（要 0 无归属才算干净）：
+
+      python3 -c 'import tomllib,fnmatch,subprocess as sp;a=[x["paths"] for x in tomllib.load(open("porting.toml","rb"))["area"] if x["status"]!="not-applicable"];f=[p for p in sp.run(["git","ls-files"],capture_output=True,text=True).stdout.split() if not p.endswith((".md",".rst")) and p!="porting.toml"];print(len(f),"files;",[p for p in f if not any(fnmatch.fnmatchcase(p,x) for ps in a for x in ps)])'
+
+- **`.cache/firmware/` 不进仓库。** 规范把专有输入放在工作树的 `.cache/firmware`，靠
+  `proprietary-files.txt` 记来源与哈希。本仓曾提交过三样：一个指向
+  `/home/hhyygg/.dsh-qqbot/workspace/unixnu-port/UniXNU/out/ipsw/21H461/kernelcache.decompressed`
+  的**符号链接**（别人克隆过来就是死链，还把本机路径公开出去），以及 `original-static-system.bundle`
+  与它的 json（Apple 派生二进制，`sha256 7416ca4f…` 已在 `proprietary-files.txt` 和
+  `[payload] trust_cache_sha256` 里钉住，`scripts/fetch-liuqin-trust-caches.py` 能从本地 21H461
+  重新生成）。现在 `.gitignore` 加 `.cache/`、从索引移除，本机文件没动所以构建照旧。
+  自检：`git ls-files .cache` 必须为空。历史里那几个对象还在，要不要重写提交由维护者单独决定。
 
 `porting.toml` 是设备记录的权威来源（`schema_version = 1`，13 个必需部分 + `cellular` 不适用）。
 改代码就要同步更新对应 `[[area]]` 的 `findings` 或 `evidence`；每个代码路径都要归属某个部分。
