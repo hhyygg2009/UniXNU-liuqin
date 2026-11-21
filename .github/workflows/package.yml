@@ -1,0 +1,101 @@
+name: package
+
+# scripts/package.sh（本仓那份是 UniXNU/templates/package.sh 的逐字副本）在 macOS runner 上
+# 产出 boot.img + payload.img + kernel.macho + package.manifest.json。设备仓、UniXNU、UEFI
+# 三个检出并排放在同一目录，正是 board.toml [package] unixnu 与 firmware.config 假设的布局。
+#
+# BLOCKED —— 这个 workflow 现在会失败，原因不在本仓：本仓的构建依赖 UniXNU 构建器上的 3 个
+# 本地提交（`git -C UniXNU rev-list --count origin/main..HEAD` = 3），官方 ref 里没有它们：
+#   21fa272  build: reset the XNU worktree before replaying the patch series (H15)
+#            没有它，改过/删过补丁后的重放会卡在重叠 hunk（本仓 AGENTS 记的同一类坑）；
+#   d883995  build: stamp KernelConfigTables personality flags
+#            没有它，翻动 CONFIG_XNU_* 人格项不会重编那张表，liuqin 的 UFS/AES 会静默用旧表；
+#   1744e53  entry probe: locate the SCTLR/ISB and CPACR pairs independently; add --panic-only
+#            --panic-only 上屏是本 project 所有实机判读的前提。
+# 上游化（或先推到 hhyygg2009/UniXNU 再把实际 ref 填进下面的 repository）之后它才可能绿。
+# 不要为了让它绿而把构建器改动藏进设备仓：规范要求的恰恰是"干净检出、无需修改"。
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options: ["17"]
+        default: "17"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          # 见顶部 BLOCKED：那三条提交到位后改成实际可用的 ref。
+          repository: UniXNU/UniXNU
+          path: UniXNU
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hhyygg2009/uefi-liuqin
+          ref: 200cbd3f0e99c19a771b080822dd5866d770c3a3
+          path: uefi-liuqin
+          submodules: recursive
+
+      - name: tools
+        run: |
+          brew install dtc llvm lld cmake mtools ninja bison pkgconf blacktop/tap/ipsw
+          {
+            echo "/opt/homebrew/opt/llvm/bin"
+            echo "/opt/homebrew/opt/lld/bin"
+            echo "/opt/homebrew/opt/bison/bin"
+          } >> "$GITHUB_PATH"
+          # 先点名再失败，别烧四十分钟才发现少工具（同族设备仓的经验）。
+          ok=1
+          for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput mformat mcopy ipsw; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          for t in llvm-nm llvm-objcopy llvm-rc; do
+            [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+
+      - name: platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the 8-hex-digit platform seed of this device.' >&2
+            echo '镜像会把它编进去，产物因此只对这台设备有效；它不属于任何仓库，也不该写进 board.toml。' >&2
+            exit 1
+          fi
+
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/package.sh --os "${{ inputs.os }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-${{ inputs.os }}
+          path: |
+            UniXNU/out/liuqin/**/boot/boot.img
+            UniXNU/out/liuqin/**/payload/payload.img
+            UniXNU/out/liuqin/**/kernel/kernel.macho
+            UniXNU/out/liuqin/**/package.manifest.json

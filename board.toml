@@ -282,3 +282,14 @@ props = [
 # Bring-up placeholder: the device has no iOS userdata yet, so no real OS volume exists.
 # Replace with the UUID that "unixnu build userdata" reports before a root mount can succeed.
 os_volume_uuid = "18AB5557-DC2D-469B-8758-855E60F5B0DF"
+
+# ---------------------------------------------------------------------------
+# 设备打包（unixnu.com/zh/porting/packaging）。schema 1 的构建不读这些表；它们是给
+# scripts/package.sh / unixnu release 用的声明——取值写在 board.toml，不写在脚本里。
+# ---------------------------------------------------------------------------
+[package]
+unixnu = "../UniXNU"              # 构建驱动检出，相对本仓
+boot_partition_bytes = 100663296  # 96 MiB；实机 ABL 实测 69,525,504 B 可用，verify 拒绝更大的 boot.img
+
+[package.defconfig]
+"ipados-17.7.11-21H461" = "liuqin_defconfig"

@@ -244,6 +244,54 @@ VA 都不是）。任一道门都能在本次构建里当场拦下这个毒常�
 （kext 段一律 `-0x1000000`，而 `__PRELINK_INFO` 是 `+0x774000`）。§3.7 正是"只补了一个全局
 slide"留下的洞，修它就用这个模型。
 
+## 规范符合性（unixnu.com/zh/porting/device-repository#completion）
+
+通用指南（本仓按这些收尾，字段解释都在原文里）：
+[移植步骤](https://unixnu.com/zh/porting/steps)、
+[迁移已有仓库](https://unixnu.com/zh/porting/migration)、
+[设备仓库](https://unixnu.com/zh/porting/device-repository)、
+[组件目录](https://unixnu.com/zh/reference/components)、
+[驱动适配顺序](https://unixnu.com/zh/porting/drivers)、
+[平台与内存](https://unixnu.com/zh/porting/platform)、
+[UFS 存储](https://unixnu.com/zh/porting/ufs)、
+[显示](https://unixnu.com/zh/porting/display)、[输入](https://unixnu.com/zh/porting/input)、
+[GPU 与 Metal](https://unixnu.com/zh/porting/gpu)、[DSP 音频与电源](https://unixnu.com/zh/porting/power)、
+[设备树](https://unixnu.com/zh/porting/device-tree)、
+[固件集成](https://unixnu.com/zh/porting/uefi-firmware)、
+[双系统分区](https://unixnu.com/zh/porting/dual-system-partition)、
+[构建与启动](https://unixnu.com/zh/building)、
+[设备打包脚本](https://unixnu.com/zh/porting/packaging)、
+[启动验证顺序](https://unixnu.com/zh/porting/bring-up)、
+[日志抓取](https://unixnu.com/zh/porting/log-capture)、
+[适配记录](https://unixnu.com/zh/porting/records)。
+本仓自己的记录在 [`porting.toml`](porting.toml)（14 个区域：configuration、firmware、cpu、memory、
+storage、display、input、gpu、network、audio、power、packaging、diagnostics、cellular）与
+[`AGENTS.md`](AGENTS.md)。
+
+逐组核对结果（`python3 scripts/porting-record.py check --device <本仓>` 现在输出
+`liuqin: 14 structured areas checked`）：
+
+| 组 | 状态 | 证据 / 缺口 |
+|---|---|---|
+| `board.toml`、`porting.toml` | 🟡 部分 | 设备名/SoC/OS profile 一致（`os_profile = "ipados-17.7.11-21H461"` 已补，检查器硬要求）；`example` 未写 ✓。**仍是 schema 1**：缺 `schema_version = 2`、`[components]`、`[device_tree]`、`[kernel] patch_series` |
+| `feeds.toml`、`unixnu.lock`、`.gitmodules` | 🟡 部分 | feeds 与 `.gitmodules`、gitlink 三方一致（`26ae865e…`）；**`unixnu.lock` 仍缺** —— `unixnu fetch` 要从 GitHub 取驱动，本机代理 TLS 断，直连只通 api.github.com |
+| `configs/`、`patches/xnu/series` | 🟡 部分 | series 已按实际重放顺序声明 60 条 ✓；`kernel.defconfig = liuqin_defconfig`，但**构建真正读的 `out/liuqin/.config` 是另一份**（`liuqin_boot_defconfig`，差 11 个开关）—— 这条已由 `scripts/check-defconfig.py` 抓成 FAIL，修法见 §7 的坑 |
+| `dts/` | 🟡 部分 | `dts/liuqin.dts` 已入库（厂商 DTB 的 dtc 反编译视图，头注释写明来源与非逐字节等价）；`[device_tree] source` 这个 schema-2 键还没有 |
+| `package/`、板级代码与构建配方 | ✅ | `package/`（ShengPlatformPower 等）+ `[kernel] archives` 12 条 + `scripts/build-*.py`；本会话 §3.7 的修复就在 `build-sheng-platform-power.py` |
+| `proprietary-files.txt`、固件配置 | ✅ | 每行哈希本机实测且与 `board.toml` 的 pin 逐字一致（IPSW 两个成员、`kernelcache_sha256`、`trust_cache_sha256`）；DSC/FDF、分区几何、镜像输入均在 `[firmware]/[bootimg]/[userdata]` |
+| `porting.toml`、`porting-record.yml` | ✅ | 14 区域 + CI 检查启用；本轮把断掉的证据路径（attic 里的 H17 补丁）与过时期望（`amfi_get_out_of_my_way`）修回真实 |
+| `.github/workflows/package.yml` | 🔴 阻塞 | 文件已写（`macos-26`、UEFI 用 `hhyygg2009/uefi-liuqin@200cbd3`、种子走 secret）。**跑不绿的原因不在本仓**：构建依赖 UniXNU 构建器上 3 个本地提交（`21fa272` 重放前重置工作树、`d883995` KernelConfigTables 人格戳、`1744e53` `--panic-only`）。上游化之前，"干净检出即可产出"这条做不到 —— 文件顶部把这三条列成 BLOCKED，不把它们藏进设备仓 |
+| `README.md`、`AGENTS.md` | ✅ | 设备范围/前置条件/构建命令齐了；本节补上通用指南链接；AGENTS 本轮新增 3 条机制坑 |
+| `.gitignore`、`local.toml.example` | ✅ | 忽略 `local.toml` 与生成目录；`unixnu.lock` 不再被忽略（规范要求提交它） |
+
+**剩下两件事**（按代价排序）：
+
+1. **schema 2 迁移**：影响面已量化 —— 全仓 **81 处 `out/liuqin` 硬编码**分布在 12+ 文件
+   （含 `patches/xnu/manual/0001-*.py`、`tools/gh-build-liuqin.py`、`tests/run-host-test.sh`），
+   且输出目录会变成 `out/<device>/<os_profile>/<config>/`。规范要求迁移后端到端复验
+   内核/固件/payload/bootimg，所以它是一次完整构建，不是改几行。
+2. **构建器那 3 条提交上游化**（或推到 `hhyygg2009/UniXNU` 并填实际 ref），否则打包 CI 永远红。
+
 ---
 
 # 附：PR #1 的 README 合并内容（@Fly116，`4fc7f56`）—— §0 至 §13
