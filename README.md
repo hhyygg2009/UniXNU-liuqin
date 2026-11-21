@@ -269,12 +269,12 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 [`AGENTS.md`](AGENTS.md)。
 
 逐组核对结果（`python3 scripts/porting-record.py check --device <本仓>` 现在输出
-`liuqin: 14 structured areas checked`）：
+`liuqin: 14 structured areas checked`；路径归属另用 `git ls-files` 对全部 `[[area]] paths` 求并集自检，现在 141 个非文档文件、0 个无归属）：
 
 | 组 | 状态 | 证据 / 缺口 |
 |---|---|---|
 | `board.toml`、`porting.toml` | 🟡 部分 | 设备名/SoC/OS profile 一致（`os_profile = "ipados-17.7.11-21H461"` 已补，检查器硬要求）；`example` 未写 ✓。**仍是 schema 1，而且是构建器自己拒绝不是没改**：`unixnu status --json` 报 `schema_version = 2 requires [board] soc_source and os_profile`，`soc_source` 还没选定（实测见分支 `schema2` 的 `00a131d26ec1`）。UniXNU 组织里确实没有 SM8475 共享仓（只有 `UniXNU-sm8550-common`），但社区里已经有三个可直接固定成 `kind = "soc"` 的载体：`a77710178a/UniXNU-sm8475-common`（`cd36e7097899`，带 `soc.toml` + 两条 soc series + `dts/sm8475.dtsi`）、`Emilelu/UniXNU-sm8475-common`（`c5b50c3927a5`）、`document97/UniXNU-soc-seed`（`e0030d06d78d`，`migration/format2/soc-seed`，另一家 liuqin 格式 2 条目就是钉它）—— 所以缺的是**选型 + 端到端复验**，见 `porting.toml` configuration 的 limits/next_action |
-| `feeds.toml`、`unixnu.lock`、`.gitmodules` | ✅ | `unixnu fetch` 已写入 `unixnu.lock`：8 个源码固定，其中 `xnu = d8b80295…` 与构建树 HEAD 逐字一致；驱动不在 lock 里而是由 gitlink 固定（`26ae865e…`，三方一致）。注意 fetch 会**记住** `-D` 的设备仓，构建脚本必须显式 `export UNIXNU_DEVICE`（AGENTS 已记） |
+| `feeds.toml`、`unixnu.lock`、`.gitmodules` | ✅ | **路径归属与专有文件卫生两条硬缺口已修**：`feeds.toml`/`unixnu.lock`/`local.toml.example`/`proprietary-files.txt`/`dts/**`/`stubs/**` 以前不归属任何 `[[area]]`（结构检查照样过，本轮真去改 `feeds.toml` 才被 `--base` 打回），`tests/run-host-test.sh` 归 diagnostics；`.cache/firmware/` 里三样东西原先被提交进公开仓 —— 一个指向维护者本机绝对路径的符号链接 `kernelcache.release.ipad7.decompressed`，以及 `proprietary-files.txt` 已按 sha256 钉住的 trust cache bundle 与其 json（Apple 派生二进制；规范说这类输入放工作树 `.cache/firmware`、不要复制进仓库）。现在 `.gitignore` 忽略 + 从索引移除，本机文件没动、哈希仍等于 pin。历史里那几个对象还在，是否重写提交是单独的决定。 `unixnu fetch` 已写入 `unixnu.lock`：8 个源码固定，其中 `xnu = d8b80295…` 与构建树 HEAD 逐字一致；驱动不在 lock 里而是由 gitlink 固定（`26ae865e…`，三方一致）。注意 fetch 会**记住** `-D` 的设备仓，构建脚本必须显式 `export UNIXNU_DEVICE`（AGENTS 已记） |
 | `configs/`、`patches/xnu/series` | 🟡 部分 | series 已按实际重放顺序声明 60 条 ✓；`kernel.defconfig = liuqin_defconfig`，但**构建真正读的 `out/liuqin/.config` 是另一份**（`liuqin_boot_defconfig`，差 11 个开关）—— 这条已由 `scripts/check-defconfig.py` 抓成 FAIL，修法见 §7 的坑 |
 | `dts/` | 🟡 部分 | `dts/liuqin.dts` 已入库（厂商 DTB 的 dtc 反编译视图，头注释写明来源与非逐字节等价）；`[device_tree] source` 这个 schema-2 键还没有 |
 | `package/`、板级代码与构建配方 | ✅ | `package/`（ShengPlatformPower 等）+ `[kernel] archives` 12 条 + `scripts/build-*.py`；本会话 §3.7 的修复就在 `build-sheng-platform-power.py` |
@@ -314,7 +314,21 @@ python3 scripts/porting-record.py site --local liuqin=<本仓路径>  # 本地�
 
 **剩下两件事**（按代价排序）：
 
-1. **schema 2 迁移**：第一步是**选定** SoC 载体而不是自己造 —— 社区已有三个可直接钉成
+0. **已实测（分支 `soccarrier-trial`，`f1f6002`）**：把社区载体钉成 `feeds.toml` 的
+   `kind = "soc"` 之后 `unixnu status --json` **rc=0 / schema_version = 2**，四层齐 ——
+   “SM8475 没有 SoC 载体”这条旧结论正式作废。钉 `document97/UniXNU-soc-seed`（`e0030d06d78d`，
+   `path = migration/format2/soc-seed`）解析出 73 条补丁（arch/os 57 + kit 2 + device 14 + soc 0）；
+   钉 `a77710178a/UniXNU-sm8475-common`（`cd36e7097899`）是 75 条，且它的
+   `native-smp-secondary.patch` 与板级同名不同内容 → 撞车点从 4 处变 5 处。另外 `dtc 1.7.2`
+   编译 `dts/liuqin.dts` 再反编译，与厂商 `liuqin.dtb`（480,704 B，sha256 `ce90f88b…`）
+   **diff 0 行**（各 1717 节点、827 compatible、157 interrupts），所以“换 schema 2 会不会换掉设备树”
+   这条也排掉了。
+1. **schema 2 迁移**：剩下四件事 —— 把 4 处同名不同内容且**行区间真重叠**的补丁
+   （`native-4k-signature-hash-cache`、`offline-component-load-probes`、
+   `zzy-native-gpu-addon-mount`、`zzy-staged-system-apps`）重基到上游版本；跑完整
+   `unixnu fetch` 让 `unixnu.lock` 记下载体；从干净检出构建 kernel/firmware/payload/bootimg
+   并上一轮机（对着 `docs/boot-rounds-v35-v44.md` 的 v44 里程碑序列比）；之后才允许 main 翻
+   `schema_version = 2`。原写的“第一步是选定 SoC 载体”已经做完 —— 社区有三个可钉：
    `feeds.toml` 里 `kind = "soc"` 的仓：`a77710178a/UniXNU-sm8475-common`（`cd36e7097899`，
    `soc.toml` + 两条 soc series + `dts/sm8475.dtsi` + `configs/sm8475.config`）、
    `Emilelu/UniXNU-sm8475-common`（`c5b50c3927a5`）、`document97/UniXNU-soc-seed`
