@@ -3,3 +3,4 @@ __pycache__/
 tests/metaclass-simtest/sim
 local.toml
 out/
+.cache/
