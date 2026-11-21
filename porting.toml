@@ -527,6 +527,7 @@ findings = [
     "Diagnostics are not free even when they are correct: every M: line this kernel printed pushed a real milestone off a panel that keeps only its tail. Retiring H16's scan was itself a fix for the observation channel.",
     "v66 confirms the overlay gate works and separates two different ghosts: with liuqin-milestone=0 the kernel milestone overlay is gone, and what still overlaps on screen is the firmware menu text (liuqin boot: 512M window (test) / 3000 ms, input yes / Payloads\\kernel.macho' Success / kits 0), which the kernel text console writes over. Do not read that as the overlay coming back.",
     "The USB debug port never enumerated this round: capture-serial.sh watched 210 s for a new CDC-ACM after the boot and saw none, and the host lost the fastboot device (18d1:d00d) entirely at hand-off. So for a boot that dies before the debug-port registration the panel is the only channel -- which is why the round is recorded from photos plus offline symbolization.",
+    "After the copyio assertion the tablet returned to fastboot by itself (fastboot devices still lists 19562650 minutes later, no button press, no cable unplug). A failed round costs tens of seconds, so the cheap way to test the telemetry gate is one switch flip plus another fastboot boot rather than re-reading the same photo."
 ]
 completion = [
     "Each claimed milestone has a reproducible command, a matching source/image revision and an accessible result.",
