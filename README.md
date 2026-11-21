@@ -274,7 +274,7 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 | 组 | 状态 | 证据 / 缺口 |
 |---|---|---|
 | `board.toml`、`porting.toml` | 🟡 部分 | 设备名/SoC/OS profile 一致（`os_profile = "ipados-17.7.11-21H461"` 已补，检查器硬要求）；`example` 未写 ✓。**仍是 schema 1**：缺 `schema_version = 2`、`[components]`、`[device_tree]`、`[kernel] patch_series` |
-| `feeds.toml`、`unixnu.lock`、`.gitmodules` | 🟡 部分 | feeds 与 `.gitmodules`、gitlink 三方一致（`26ae865e…`）；**`unixnu.lock` 仍缺** —— `unixnu fetch` 要从 GitHub 取驱动，本机代理 TLS 断，直连只通 api.github.com |
+| `feeds.toml`、`unixnu.lock`、`.gitmodules` | ✅ | `unixnu fetch` 已写入 `unixnu.lock`：8 个源码固定，其中 `xnu = d8b80295…` 与构建树 HEAD 逐字一致；驱动不在 lock 里而是由 gitlink 固定（`26ae865e…`，三方一致）。注意 fetch 会**记住** `-D` 的设备仓，构建脚本必须显式 `export UNIXNU_DEVICE`（AGENTS 已记） |
 | `configs/`、`patches/xnu/series` | 🟡 部分 | series 已按实际重放顺序声明 60 条 ✓；`kernel.defconfig = liuqin_defconfig`，但**构建真正读的 `out/liuqin/.config` 是另一份**（`liuqin_boot_defconfig`，差 11 个开关）—— 这条已由 `scripts/check-defconfig.py` 抓成 FAIL，修法见 §7 的坑 |
 | `dts/` | 🟡 部分 | `dts/liuqin.dts` 已入库（厂商 DTB 的 dtc 反编译视图，头注释写明来源与非逐字节等价）；`[device_tree] source` 这个 schema-2 键还没有 |
 | `package/`、板级代码与构建配方 | ✅ | `package/`（ShengPlatformPower 等）+ `[kernel] archives` 12 条 + `scripts/build-*.py`；本会话 §3.7 的修复就在 `build-sheng-platform-power.py` |
