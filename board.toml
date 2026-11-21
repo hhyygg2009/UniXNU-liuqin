@@ -9,6 +9,7 @@ schema_version = 2
 # carries the command or file that produces it. Do not remove a TODO without the evidence.
 
 [board]
+soc_source = "sm8475"   # 试验：feeds.toml kind = "soc" 的载体名
 os_profile = "ipados-17.7.11-21H461"   # 记录用：schema 1 的构建不读它（porting-record.py check 要求与 porting.toml 一致）
 name = "liuqin"
 soc = "SM8475"
@@ -34,7 +35,8 @@ include = ["XnuPrelink"]
 
 [device_tree]
 source = "device:dts/liuqin.dts"
-# include_dirs 留空：没有 SoC 仓可引。dts/liuqin.dts 是厂商 DTB 的 dtc 反编译视图，
+include_dirs = ["soc:dts"]  # 试验：SoC 载体提供 dts/sm8475.dtsi
+# （原注释）没有 SoC 仓可引时 include_dirs 留空。dts/liuqin.dts 是厂商 DTB 的 dtc 反编译视图，
 # 权威输入仍是 [firmware] 产出的 liuqin.dtb（哈希钉在 proprietary-files.txt）。
 # 迁移必须验证"由本 DTS 编出的 DTB 与现用的 liuqin.dtb 等价"，否则 bootimg 会换设备树。
 
@@ -74,8 +76,8 @@ windows = [
 defconfig = "liuqin_defconfig"
 # 有序补丁系列（completion 第 3 组）。schema 1 时代设备仓复制了 46 个上游补丁；
 # schema 2 由 profile 根提供，设备侧只留 14 条独有项，见 patches/xnu/series 的说明与 TODO。
-patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
-config_fragments = ["arch:configs/common.config", "os:configs/ipados.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8475.config", "os:configs/ipados.config"]
 # Archive builders of the kernel step, in order: unixnu runs them between the
 # bootstrap pass and the real link. Trimmed to what liuqin_boot_defconfig enables:
 # source corecrypto (prelink closure), the Apple-format device-tree platform expert

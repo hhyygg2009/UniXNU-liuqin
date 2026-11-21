@@ -15,3 +15,13 @@ name = "ShengUfs"
 git = "https://github.com/Fly116/ShengUfs.git"
 ref = "liuqin-sm8475-v56"
 commit = "26ae865ea31492cb9f156621a04acc2effff1092"
+
+# schema-2 迁移试验（分支 soccarrier-trial）：把社区已有的 SM8475 SoC 载体钉成 kind = "soc"。
+# 候选与实测见 porting.toml configuration；本条先试 a77710178a/UniXNU-sm8475-common，
+# 它的 dts/sm8475.dtsi 里 14 个 reg 首元全部出现在本板厂商 DT（dts/liuqin.dts）里。
+[[source]]
+kind = "soc"
+name = "sm8475"
+git = "https://github.com/document97/UniXNU-soc-seed"
+path = "migration/format2/soc-seed"
+commit = "e0030d06d78da5b3a92be23a97081535627d1286"
