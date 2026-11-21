@@ -131,7 +131,7 @@ userdata 从 105.79 GiB 缩到 94 GiB，尾部腾出一个 raw 分区 `unixnu` �
 | 磁盘 | 124,893,790,208 B = 30,491,648 个 4096 B LBA |
 | `userdata`（条目 34） | `2758144..27399679` = 100,931,731,456 B（94 GiB；原 `2758144..30491642`） |
 | `unixnu`（条目 35，新增） | `27399680..30491642` = 12,664,680,448 B（11.7949 GiB） |
-| SHNGROOT manifest base | LBA 27399680 = `0x1A21600`，根镜像之后余量 3,282,022,400 B |
+| SHNGROOT manifest base | 第 27399680 个 LBA（`0x1A21600`）= 字节 `0x1A21600000` = 112,229,089,280；根镜像之后余量 3,282,022,400 B |
 | 启动参数 | `native-ufs-root=1 native-ufs-root-partition=unixnu`（cmdline 961 B / 上限 1000 B） |
 
 设备侧校验（TWRP 里的 adbd，root）：`/dev/block/by-name/unixnu -> sda36`；首块 magic
@@ -185,7 +185,7 @@ Kernel instruction fetch abort at pc 0x003f0100aa1503e0, lr 0xfffffff0079eb28c
     .set __ZN9ApplePMGR7readAonEv,  0xd63f0100aa1503e0
     .set __ZN9ApplePMGR8writeAonEy, 0xf940f508f9400008
 
-这两个值**不是地址，是指令字**（`mov x0,x21` / `blr x8`，`ldr x8,[x0]` / `ldr x8,[x8,#0x1f8]`），
+这两个值**不是地址，是指令字**（`mov x0,x21` / `blr x8`，`ldr x8,[x0]` / `ldr x8,[x8,#0x1e8]`），
 被当成 `ApplePMGR::readAon` / `writeAon` 的函数指针写进了 `__ZTV18ShengPlatformPower`，
 虚调用就跳到代码页上当数据取指。来源在 `scripts/build-sheng-platform-power.py`：
 
@@ -204,9 +204,12 @@ Kernel instruction fetch abort at pc 0x003f0100aa1503e0, lr 0xfffffff0079eb28c
 `+slide`；`build-sheng-platform-power.py` **一处 slide 处理都没有**，而它那些 `require()` 只校验
 符号名和槽位形状，从不校验取到的值像不像地址，所以坏常量一路通过 `build-report.json` 进了链接。
 
-**下一步（本轮未做）**：给 platform-power 的绑定补 slide，或加一道"binding 必须落在参考镜像
-可执行段内"的校验，或在缺 candidate 时直接拒绝构建；然后重跑 v60 才能重新判断根挂载。
-根挂载与 userland 至今仍未达成 —— 与本节开头那两条实机结论不冲突。
+**下一步（本轮未做）**：给 platform-power 的绑定补 slide；并加两道 sanity 门 ——
+读位置必须落在参考镜像的**数据段**（vtable 是数据，这次它落在了 `__PLK_TEXT_EXEC`），
+读出来的值必须是参考镜像里**已映射且可执行**的地址（函数指针，`0xd63f0100aa1503e0` 连合法
+VA 都不是）。任一道门都能在本次构建里当场拦下这个毒常量；或者干脆在缺 candidate 时拒绝构建。
+改完要重跑一遍 v60 才能重新判断根挂载。
+根挂载与 userland 至今仍未达成，本节记录的是"§5 分区方案本身成立 + 卡点换了位置"。
 
 ## 致谢 / Acknowledgments
 
