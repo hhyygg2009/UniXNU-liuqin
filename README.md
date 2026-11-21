@@ -25,9 +25,12 @@ XNU 源码、UniXNU 构建驱动、Mu-Silicium 固件、工具链都不在本仓
   `namespace 9 / code 0x8` 的语义**还没查清，不许当结论用**。
 - 根挂载与 userland 仍未达成；分区改造（`unixnu` 根分区）已落地并逐字节校验过。
 
-逐轮细节：`docs/boot-rounds-v35-v44.md`（v35→v44）、`docs/bringup-2026-11-19-session.md`、
-`docs/bringup-2026-11-21-v66-round.md`、`docs/bringup-2026-11-21-v67-telemetry-gate.md`（在
-`v67-telemetry-gate` 分支）。**权威结构化记录是 [`porting.toml`](porting.toml)**（14 个区域）。
+逐轮细节都在 `docs/`：[`boot-rounds-v35-v44.md`](docs/boot-rounds-v35-v44.md)（v35→v44 每轮改了什么、
+照片看到什么、哪些假设被证伪）、[`bringup-2026-11-19-session.md`](docs/bringup-2026-11-19-session.md)、
+[`bringup-2026-11-21-v66-round.md`](docs/bringup-2026-11-21-v66-round.md)、
+[`bringup-2026-11-21-local-merge.md`](docs/bringup-2026-11-21-local-merge.md)（未推送本地线的取舍与两条否决）、
+`docs/bringup-2026-11-21-v67-telemetry-gate.md`（在 `v67-telemetry-gate` 分支）。
+**权威结构化记录是 [`porting.toml`](porting.toml)**（14 个区域，缺口看 `limits` / `next_action`）。
 
 ## 快速开始
 
@@ -80,7 +83,7 @@ python3 ../UniXNU/scripts/porting-record.py check --device <本仓> [--base orig
 | `patches/xnu/` | 板级 XNU 补丁序列（`series` 按重放顺序）+ `attic/`（不入库序列的历史补丁） |
 | `scripts/` | 构建/绑定/打包/判读/守卫脚本（`read-panel.py`、`capture-serial.sh`、`check-*.py`） |
 | `tests/` | 主机侧仿真 `metaclass-simtest/`、USB 调试口逻辑测试 |
-| `docs/` | 硬件底账、厂商输入、逐轮判读、分区方案、trust-cache 方案、Fly116 原文 |
+| `docs/` | 硬件底账、厂商输入、逐轮判读、分区方案、trust-cache 方案、Fly116 原文（`fly116-pr1-readme.md`） |
 | `proprietary-files.txt` | 专有输入的**来源与哈希**（文件本身放工作树 `.cache/firmware`，不入库） |
 
 ## 依赖
