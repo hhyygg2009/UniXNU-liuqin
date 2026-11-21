@@ -73,6 +73,29 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 设备仓库。本仓库拥有板级 DTS、�
   .../out/liuqin/tree/drivers/NativeUfs/NativeUfs.cpp`（2026-11-19 22:44 试 `test-pr1` 就是这么把构建弄死的）。
   fork 留成 remote `mine`、维护者留成 `fly116`，`.gitmodules` 继续指 fork（记录的 commit 才公开可解析）。
   一句话自检：`./unixnu tree && ls -l out/liuqin/tree/drivers/NativeUfs`。
+- **证据引用不要指进子模块，CI 看不见那里。** UniXNU 的复用工作流
+  （`.github/workflows/porting-record.yml` → `UniXNU/UniXNU/.github/workflows/porting-record.yml`）
+  只用 `actions/checkout@v4` 检出设备仓，**不初始化子模块**，而检查器要求非 HTTPS 的
+  `reference` 必须是仓里真实存在的文件（`evidence file missing`），所以
+  `reference = "drivers/ShengUfs/NativeUfs.cpp"` 这类条目会把 `Device documentation` 直接打红，
+  本地却永远复现不出来（本地子模块是满的）。规矩：跨仓的代码证据一律用 HTTPS permalink，
+  并且**逐条核 blob** —— `tests/check_legacy_descriptors.py` 在公开 `26ae865ea314` 与当初跑测试的
+  私有 gitlink `433e7fdd5735` 上是同一个 `654934e7f0f6`，这条链接才算数。
+  自检：`git worktree add /tmp/x <分支> && python3 ../UniXNU/scripts/porting-record.py check --device /tmp/x`
+  （干净检出 = CI 条件）。
+- **驱动 H16 的中间态没有公开可解析的 commit。** `Fly116/ShengUfs` 上只有 v39 重写的
+  `adc855a5a05a`（`liuqinBlockSuperClass`/`liuqinBlockAdoptSuperClass`/`liuqinBlockChainOk`）和
+  退役后的 `26ae865ea314`；`433e7fdd5735`、`8abb519365d7`、`91c6fcc35d1c`、`c36c575fe0a0` 和
+  `liuqinBaseClassFree`/`liuqin_block_super_fix`/`liuqinMetaclass*` 都在维护者的私有克隆里，
+  三个公开 ShengUfs 都查不到。所以那段历史引 `docs/boot-rounds-v35-v44.md`，不要写成能点开的源码；
+  要恢复可复核性就把这几条推到 fly116 或 mine 的分支上（storage 的 `next_action`）。
+- **schema 2 是"缺输入"不是"没改"。** 2026-11-21 在分支 `schema2`（`00a131d26ec1`）实测：
+  `unixnu status --json` 拒绝 —— `schema_version = 2 requires [board] soc_source and os_profile`，
+  而 SM8475 上游没有共享 SoC 仓（组织里只有 `UniXNU-sm8550-common`），`soc_source` 无从指名。
+  同一轮还量化了补丁：60 条顶层补丁里 46 条与上游 arch/os profile 逐字节相同（schema 1 解析不了
+  profile 根才复制进来的），真正的板级 series 是 14 条，另有 4 条同名不同内容要重新基化、
+  schema 2 会多出 6 条上游补丁 —— **内核会变，所以必须整轮端到端复验，不能顺手把 main 翻成 2**。
+  后果记清楚：board 停在 1，`sync-devices` 就按 `format = 1` 收录，站点只给仓库链接、不生成设备页。
 - **上机前看 `out/liuqin/payload/payload.json` 的 `kernel_args`，别看镜像文件名。** `out/` 会被上一轮试验
   留在别的配置上（2026-11-19 那一晚它就停在 `test-pr1` 的 payload，参数里连 `amfi_get_out_of_my_way` 都没有），
   而 `releases/*.img` 才是发出去的那个。抓它的正是 `audit-h16f-image.py` 的 `Y` 段。
