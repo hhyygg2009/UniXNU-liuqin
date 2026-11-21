@@ -45,7 +45,7 @@ windows = [
 ]
 
 [kernel]
-defconfig = "liuqin_defconfig"
+defconfig = "liuqin_boot_tc_defconfig"   # 2026-11-21：这份才等于实际生效的 out/liuqin/.config（TRUST_CACHE_RUNTIME=y）
 # Archive builders of the kernel step, in order: unixnu runs them between the
 # bootstrap pass and the real link. Trimmed to what liuqin_boot_defconfig enables:
 # source corecrypto (prelink closure), the Apple-format device-tree platform expert
@@ -211,7 +211,7 @@ kernel_args = [
   "-apfs_shared_datavolume",
   "offline-key-events=1",
   # "native-ufs-root=1",
-  "native-ufs-root-partition=unixnu",   # stub 内核没有 _sheng_pmgr_run 符号，先关掉这项 AMFI 预检
+  "telemetry_sample_all_tasks=0",   # v67：第二个 native-ufs-root-partition 是惰性的（PE_parse_boot_argn 取第一个），腾出 32B 给这道门
   # native-ufs-stats-delay=30  (dropped: kernel command line hit the 1000-byte limit; re-add by trading another arg)
   # sheng-pmgr=2  superseded: the platform-power provider reads "pmgr" (the payload gate
   # requires exactly pmgr=2 for native-ufs-root=1)            # TODO(liuqin): 复用 sheng 的 PMGR 探测，需在 SM8475 上验证或改名
