@@ -1,0 +1,29 @@
+# liuqin (Xiaomi Pad 6 Pro / SM8475) 专有输入清单。
+#
+# 格式照 UniXNU-sheng/proprietary-files.txt：`path|sha256`，路径前缀 `-` 表示可选。
+# 与 sheng 不同的是这里**没有 @fetch 行**：liuqin 的固件输入不是公开 git 原始文件，而是小米
+# 官方线刷包与 Apple IPSW 的解出物，落地在 .cache/firmware/（构建把它符号链接进构建树，
+# 不复制进仓库；见 unixnu.com/zh/porting/device-repository#专有文件）。
+# 每一行的哈希都是本机实测值，不是抄来的。
+
+# 官方线刷包（UEFI 模块、uefiplat.cfg、面板 XML、logo 的唯一来源）
+# 5,915,861,390 B；由 scripts/import-liuqin-uefi.py 读出 stock uefi.elf，抽出 93 个 PE32 + 58 个 Raw。
+# 获取：小米官方 V14.0.9.0.TMYCNXM（liuqin_images_V14.0.9.0.TMYCNXM_20230907.0000.00_13.0_cn_58bf72f5e6.tgz）。
+# URL 会随官方轮换变动，因此不写死；写死后必须与下面这条哈希一起复核。
+-liuqin_images_V14.0.9.0.TMYCNXM_20230907.0000.00_13.0_cn_58bf72f5e6.tgz|ae49e11b098904ff550511f7bc06f24f17d9817abede739e279b903fceee6082
+
+# Apple 恢复镜像成员（iPad7,1 17.7.11 / 21H461）；与 board.toml [ipsw.sha256] 必须一致
+044-76040-038.dmg|3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d
+044-76034-038.dmg|b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f
+
+# 原始 kernelcache（预链接与 §3.5/§3.7 全部绑定的地址空间基准）
+# 解出物 out/ipsw/21H461/kernelcache.decompressed；board.toml [kernel.prelink] kernelcache_sha256 钉的是它
+kernelcache.decompressed|f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7
+
+# trust cache 包（module 0 = IPSW 静态缓存，module 1 = Cryptex1,SystemTrustCache，逐字节取自恢复镜像）
+# 由 scripts/fetch-liuqin-trust-caches.py 生成；board.toml [payload] trust_cache_sha256 认这个哈希
+trustcache/original-static-system.bundle|7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7
+trustcache/original-static-system.bundle.json|d73826a7eb1de0e445100c9512ad938fe1c6ff84c96c24e20704bb5b55a35243
+
+# 板级设备树：来自 stock uefi.elf 的 DTB，本仓 dts/liuqin.dts 是它的 dtc 反编译视图（见该文件头）
+Resources/DTBs/liuqin.dtb|ce90f88b645ffdcc844ede7b0c57162c082079c4ee162f6b6e262389066b2d31

@@ -1,0 +1,17 @@
+# liuqin 的源码固定。规范：unixnu.com/zh/porting/device-repository#feedstoml
+#
+# 现状说明（不假装已完成）：本仓仍是 schema 1，驱动以 **git 子模块** 固定，SoC 支持内联在
+# 设备仓与驱动仓里，还没有 UniXNU-sm8475-common 这样的共享 SoC 仓，所以这里不编造
+# kind = "soc" 条目。board.soc_source 与 [components] 的引入是 schema 2 迁移的一部分，
+# 已记在 porting.toml 的待办里（"Migrate board.toml to schema_version = 2 … re-verify
+# kernel, firmware, payload and bootimg end to end"）。
+
+# 板级 UFS/SMMU/根存储驱动：与 .gitmodules 的 url/branch 和 gitlink 提交一致。
+# 核对方式：git submodule status drivers/ShengUfs；改驱动后必须更新这个 gitlink，
+# 否则 unixnu 会静默检出上一个提交（本仓 v56 记录里写过这条教训）。
+[[source]]
+kind = "driver"
+name = "ShengUfs"
+git = "https://github.com/Fly116/ShengUfs.git"
+ref = "liuqin-sm8475-v56"
+commit = "26ae865ea31492cb9f156621a04acc2effff1092"

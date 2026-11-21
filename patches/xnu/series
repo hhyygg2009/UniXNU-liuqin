@@ -1,0 +1,76 @@
+# Ordered XNU patch series for liuqin (SM8475).
+#
+# One patch per line, applied top to bottom; `#` starts a comment; relative paths resolve
+# from this directory (unixnu.com/zh/porting/device-repository#有序配置和补丁).
+#
+# This file is generated-from, not invented: it lists exactly the 60 top-level *.patch files
+# that the schema-1 build applies today, in the name order `build-xnu-4k-baseline.sh` replays
+# them in. Keeping the declaration here is what makes the order reviewable; the schema-2
+# migration ([kernel] patch_series = ["device:patches/xnu/series"]) is the remaining step and
+# is tracked in porting.toml.
+#
+# NOTE the trap this documents: with UNIXNU_PATCH_LIST set (our build recipe exports
+# `UNIXNU_PATCH_LIST=manual`), build-xnu-4k-baseline.sh skips its own stamp/replay block
+# entirely (line 52), so editing a patch here has NO effect until the series is resolved by
+# the builder. That is one of the reasons to finish the schema-2 migration.
+
+apple-only-cpu-tunables.patch
+architectural-timer-entry.patch
+armvirt-platform-personality.patch
+cxx-flag-dependencies.patch
+disabled-deferred-reclaim.patch
+external-archive-dependencies.patch
+kernel-sdk-root.patch
+local-availability.patch
+mockfs-intermediate-lookup.patch
+mockfs-memory-device-width.patch
+mockfs-statfs.patch
+mockfs-test-file.patch
+mockfs-typed-allocation.patch
+native-4k-bootstrap-capacity.patch
+native-4k-signature-hash-cache.patch
+native-4k-user-abi.patch
+native-aes-personality.patch
+native-arm-pan.patch
+native-dt-panic-region.patch
+native-priv-work-interval.patch
+native-quiet-managed-page-report.patch
+native-smp-secondary.patch
+native-text-fixup.patch
+native-trust-cache-runtime.patch
+native-union-getattrlistbulk.patch
+native-volatile-panic-region-liuqin.patch
+native-work-interval-soft-fail.patch
+native-work-interval-trace.patch
+non-apple-cache-monitor.patch
+non-apple-iommu-bootstrap.patch
+non-apple-pmap-field.patch
+null-root-media.patch
+offline-component-load-probes.patch
+offline-legacy-start.patch
+offline-native-gpu-broker.patch
+offline-owner-boot-manifest.patch
+offline-owner-cache-carrier.patch
+offline-owner-root-binding-audit.patch
+offline-owner-root-crypto-probe.patch
+offline-owner-systemos-mount.patch
+offline-owner-z-air-init.patch
+offline-pgz-alignment-probe.patch
+pgz-aligned-validation.patch
+public-entitlements-header.patch
+published-freezer-condition.patch
+sheng-platform-power.patch
+source-corecrypto14-bootstrap.patch
+source-machine-layer.patch
+source-pthread-bootstrap.patch
+zzw-native-adreno-sandbox-grant.patch
+zzx-pmap-sync-64bit-pa.patch
+zzy-native-gpu-addon-mount.patch
+zzy-staged-system-apps.patch
+zzz-boot-progress.patch
+zzz-liuqin-usb-debug.patch
+zzz-liuqin-usb-debug2.patch
+zzz-liuqin-usb-debug4.patch
+zzz-liuqin-usb-debug5.patch
+zzzzzzzzz-liuqin-development-root-policy.patch
+zzzzzzzzzzz-liuqin-ctor-trace.patch

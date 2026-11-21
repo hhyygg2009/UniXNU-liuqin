@@ -4,6 +4,7 @@
 # carries the command or file that produces it. Do not remove a TODO without the evidence.
 
 [board]
+os_profile = "ipados-17.7.11-21H461"   # 记录用：schema 1 的构建不读它（porting-record.py check 要求与 porting.toml 一致）
 name = "liuqin"
 soc = "SM8475"
 description = "Xiaomi Pad 6 Pro"
