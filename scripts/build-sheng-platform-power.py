@@ -125,6 +125,64 @@ candidate = reference.read_bytes()
 meta = macho(candidate)
 native_names = {n: va for va, names in exports(candidate, meta).items() for n in names}
 
+# --- reference address space (2026-11-21, liuqin v60) -------------------------------------
+# Every baked constant in this file -- the AON table base below and the ctor/dtor/gMetaClass
+# and _sheng_original_pmgr_nub_* set -- is a VA in the *emitted* layout (cache VA + board
+# slide), because that is where the shipped kernel maps the prelink and where these .set
+# values get branched to at runtime.  A pipeline candidate already has that layout, but the
+# fallback reference added in 71c6278 is out/ipsw/<build>/kernelcache.decompressed: the
+# original, unslid image.  Reading an emitted VA out of an unslid image lands one slide off,
+# inside __PLK_TEXT_EXEC, so ptr() hands back two instruction words, they get bound as
+# function pointers, and the boot dies with
+#     Kernel instruction fetch abort at pc 0x003f0100aa1503e0, lr = _sheng_pmgr_run+0x364
+# where 0xd63f0100aa1503e0 is exactly `.set __ZN9ApplePMGR7readAonEv` -- `mov x0,x21` plus
+# `blr x8` read as a pointer.
+#
+# A single slide is also the wrong shape: the prelink report moves every kext segment by
+# -0x1000000 but __PRELINK_INFO by +0x77c000, so map per segment.  That is the H16 lesson
+# (docs/boot-rounds-v35-v44.md, v41 "M:alien delta=-16777216 slide=0x0"), applied here.
+PROT_EXEC = 4
+AON_TABLE_BASE = 0xfffffff005ce26d8          # __ZTV...+0x10 for the inherited AON slots
+_kernel_json = ROOT.parent / 'kernel/kernel.json'
+EMITTED = ({seg['name']: (seg['va'], seg['size'])
+            for seg in json.loads(_kernel_json.read_text()).get('coalesced_segments', [])}
+           if _kernel_json.is_file() else {})
+REF = {seg['name']: (seg['va'], seg['size'], seg['initprot']) for seg in meta['segments'] if seg['size']}
+
+
+def _segment_of(va, table):
+    for name, (base, size, *_rest) in table.items():
+        if base <= va < base + size:
+            return name, (base, size, _rest[0] if _rest else 0)
+    return None, None
+
+
+def _translate(va, source, target):
+    """Map a VA between two layouts by segment name; identity when either side is unknown."""
+    name, span = _segment_of(va, source)
+    if name is None or name not in target:
+        return va
+    return va + (target[name][0] - span[0])
+
+
+def aon_binding(table_va):
+    """Read one inherited AON method pointer, with the address space checked both ways."""
+    at = _translate(table_va, EMITTED, REF)          # emitted -> reference image
+    name, span = _segment_of(at, REF)
+    require(span is not None,
+            f'AON table VA {table_va:#x} (reference {at:#x}) is not mapped in {reference.name}: '
+            'the reference image and these baked constants disagree about the layout')
+    require(not span[2] & PROT_EXEC,
+            f'AON table VA {table_va:#x} resolves to {at:#x} inside the executable segment {name} of '
+            f'{reference.name}; a vtable is data, so this reference is in a different address space '
+            'than these constants and the read would return instruction words. Refusing to bind it.')
+    value = ptr(at)
+    vname, vspan = _segment_of(value, REF)
+    require(vspan is not None and vspan[2] & PROT_EXEC,
+            f'AON method pointer {value:#x} read at {at:#x} is not a mapped executable address in '
+            f'{reference.name} (segment={vname}); refusing to bind it')
+    return _translate(value, REF, EMITTED)           # reference -> emitted, i.e. runtime space
+
 
 def ptr(va):
     return struct.unpack_from('<Q', candidate, backed_offset(meta['segments'], va, 8, len(candidate)))[0]
@@ -138,7 +196,7 @@ for slot, name in enumerate(entries):
         require('18ShengPlatformPower' in name, f'Own guard/lifecycle required at slot {slot}')
     elif slot in (320, 321):
         require('9ApplePMGR' in name, 'Only actual original AON implementations inherited')
-        bindings[name] = ptr(0xfffffff005ce26d8 + slot * 8)
+        bindings[name] = aon_binding(AON_TABLE_BASE + slot * 8)
     else:
         require(native_names.get(name) == ptr(native_names['__ZTV6IOPMGR'] + 16 + slot * 8),
                 f'Native IOPMGR/IOService entry differs at {slot}')
