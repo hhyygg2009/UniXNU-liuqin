@@ -11,6 +11,9 @@
 #   native-volatile-panic-region-liuqin.patch   static panic log fallback (liuqin ADT
 #                                      has no pram node; generated against the base blob
 #                                      of native-dt-panic-region.patch and sorted after it)
+#   zzzz-liuqin-trust-cache-lock-init.patch     sleepable trust-cache lock when the runtime
+#                                      block is compiled out (must sort after every patch
+#                                      that touches startup.c, or the export bakes them in)
 #   native-cryptex-os-view.patch, offline-*, ...  any other device patch: add its exact
 #                                      name to KEEP below or it is deleted by this sync.
 set -e
@@ -22,7 +25,8 @@ test -d "$base" || { echo "base patches not found: $base" >&2; exit 1; }
 # numbered follow-ups (2,4,5) via the explicit glob entries below.
 tmp=$(mktemp -d)
 saved=0
-for pat in 'zzz-liuqin-usb-debug*.patch' 'native-volatile-panic-region-liuqin.patch'; do
+for pat in 'zzz-liuqin-usb-debug*.patch' 'native-volatile-panic-region-liuqin.patch' \
+           'zzzz-liuqin-trust-cache-lock-init.patch'; do
     for f in "$here"/patches/xnu/$pat; do
         [ -f "$f" ] || continue
         cp "$f" "$tmp/"

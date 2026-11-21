@@ -1,0 +1,53 @@
+diff --git a/bsd/kern/kern_trustcache.c b/bsd/kern/kern_trustcache.c
+index 038e044..a01022e 100644
+--- a/bsd/kern/kern_trustcache.c
++++ b/bsd/kern/kern_trustcache.c
+@@ -624,6 +624,17 @@ xnu_query_trust_cache(
+ 		return KERN_INVALID_ARGUMENT;
+ 	}
+ 
++	/*
++	 * liuqin: nothing validates this interface when the trust-cache runtime block is
++	 * compiled out (see osfmk/kern/startup.c), and the call below is
++	 * amfi->TrustCache.query(). Answering "not found" is what an empty trust cache means
++	 * anyway; dereferencing NULL is not.
++	 */
++	if (amfi == NULL) {
++		printf("unable to query trust caches: amfi interface not available\n");
++		return KERN_NOT_FOUND;
++	}
++
+ 	/* Lock the runtime as shared */
+ 	lck_rw_lock_shared(&trust_cache_rt_lock);
+ 
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index c838cc3..984e2dd 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -793,6 +793,26 @@ kernel_bootstrap_thread(void)
+ 
+ 	/* Load the static and engineering trust caches */
+ 	load_static_trust_cache();
++#else
++	/*
++	 * liuqin: this configuration compiles the trust-cache runtime out -- the baseline is
++	 * built as the BCM2837 platform and XNU_NATIVE_TRUST_CACHE is off, so neither
++	 * trust_cache_runtime_init() nor load_static_trust_cache() exists in the image (the
++	 * "trust_cache_init" bootstrap string is absent from kernel.macho, which is how the
++	 * v42 panel was explained). The lock the kernel still takes on every trust-cache
++	 * query, however, is only made sleepable inside trust_cache_runtime_init(): a
++	 * decl_lck_rw_data() object lives in BSS, so lck_rw_can_sleep is false, and
++	 * lck_rw_lock_shared() panics with "Taking non-sleepable RW lock with preemption
++	 * enabled" (lock_rw.c:1400) the first time AMFI asks whether a cdhash is trusted.
++	 * That is the exec of init, i.e. every boot. Initialise the lock here instead, so
++	 * the trust cache answers and code signing stays a MACF decision. The milestone
++	 * below is the panel proof that this branch ran.
++	 */
++	extern lck_rw_t trust_cache_rt_lock;
++	extern lck_grp_t trust_cache_lck_grp;
++
++	kernel_bootstrap_log("trust_cache_lock_init");
++	lck_rw_init(&trust_cache_rt_lock, &trust_cache_lck_grp, 0);
+ #endif
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);

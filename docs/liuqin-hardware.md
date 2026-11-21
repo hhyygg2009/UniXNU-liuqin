@@ -8,7 +8,7 @@
 
 | 项 | 值 | 来源 |
 | --- | --- | --- |
-| SoC | SM8475 / cape；compatible = "xiaomi,liuqin","qcom,sm8450" | liuqin-nixos sm8450-xiaomi-liuqin.dts |
+| SoC | SM8475 / cape；根节点 `compatible = "xiaomi,liuqin", "qcom,sm8475"`，`model = "Xiaomi Pad 6 Pro"`，`chassis-type = "tablet"` | 两处独立证据：mainline Ubuntu 板 DTS `../upstream/kernel-dts/sm8475-xiaomi-liuqin.dts:27-29`；它实际发布并被本机 ABL 接受的 boot DTB `../upstream/ubuntu-boot.dts:3-11`（旧记录写的 `"qcom,sm8450"` 是错的） |
 | 主线归类 | 归到 sm8450 家族（含 alsa-ucm2 路径 Qualcomm/sm8450/Xiaomi-Pad-6-Pro） | liuqin-nixos |
 | vendor_boot 里的 base DTB | 9 个 SoC 的 DTB，其中 Cape = 第 2 个（msm-id 0x212=530、0x21C? 见下） | 本地解包，见 D 节 |
 | msm-id / board-id | msm-id = 531/540/530 各带 0x10000；board-id = <0x10008 0>；xiaomi,miboard-id = <0x10 0>（hwid.project=16 → 第 15 个 stock DTBO 条目） | liuqin-abl-boot-overlay.dts |
@@ -21,6 +21,11 @@
 | adsp | 0x9fd00000 +0x3100000 | 同上 |
 | PMIC 家族 | pm8350 / pm8350b / pm8350c / pm8450 / pmk8350 / pmr735a（= SM8450 waipio 那套，不是 SM8550 的） | 同上 include 列表 |
 | UFS PHY | 0x1d80000（SM8450 是 0x1d87000），qcom,ufs-phy-qmp-v4-cape，v6 窗口 COM0/PCS 0x400/TX 0x1000/RX 0x1200 | 同上注释（对着 stock bootloader DTB 核过） |
+| GIC / timebase | GICD 0x17100000+0x10000，GICR 0x17180000+0x200000，stride 0x40000，arch timer 19.2 MHz | 与我们 `scripts/make-liuqin-adt.py:35-38,43` 的钉值逐项相同；来源 `../upstream/kernel-dts/sm8450.dtsi:5148-5156,6399`（第二方独立确认） |
+| UFS 中断 / lane | `GIC_SPI 265` LEVEL_HIGH，`lanes-per-direction = <2>`，compatible `qcom,sm8450-ufshc`,`qcom,ufshc`,`jedec,ufs-2.0` | `../upstream/kernel-dts/sm8450.dtsi:5361-5368`（我们目前是轮询，转中断时要用） |
+| SMEM 锁 | `smem@80900000 +0x200000`，`hwlocks = <&tcsr_mutex 3>` | `../upstream/kernel-dts/sm8450.dtsi:643-648`；地址与 `uefi-liuqin .../MemoryMapLib.c:12` 一致，`tcsr_mutex` 是新信息：真读 SMEM 要按它排队 |
+| rmtfs | `0xf8700000 +0x280000`，`qcom,rmtfs-mem`，client-id 1，vmid 0x0f（MSS_MSA），`no-map` | `../upstream/ubuntu-boot.dts:906-912`。**我们的内存表里没有这一条**，`MemoryMapLib.c:58` 的 DXE Heap（0xF8000000+0x7C00000）把它当成可分配 RAM —— 冲突记录见 `docs/mainline-ubuntu-reference.md` 第 4 节 |
+| uefi_log | `0x808e4000 +0x10000` | `../upstream/kernel-dts/sm8450.dtsi:637-640`；我们的 `MemoryMapLib.c` 没有这条，原厂 UEFI 在此留日志（暂未利用） |
 | 按键 | 音量上、音量下、电源（无其它物理键） | golden 三键，BOOT-ARCHITECTURE |
 | 音频 | 4 扬声器 CS35L41，mic WCD9385；vendor 无 AP 可见 DMIC | PORTING-NOTES |
 | 指纹 | FPC1264 | PORTING-NOTES |

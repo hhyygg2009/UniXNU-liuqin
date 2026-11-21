@@ -1,6 +1,4 @@
-out/
-.cache/
-*.log
 __pycache__/
 *.pyc
 unixnu.lock
+tests/metaclass-simtest/sim
