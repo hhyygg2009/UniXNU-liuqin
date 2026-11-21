@@ -294,12 +294,23 @@ storage、display、input、gpu、network、audio、power、packaging、diagnost
 | README 有职责、依赖、构建入口和记录链接；`AGENTS.md` 指向同一必读 | ✅ 见上一节；`AGENTS.md` 的必读表里直接列了本节链接 |
 | 通用方法回写公共指南 | ⏳ 本轮两条（CI 不初始化子模块所以证据必须用 HTTPS permalink；schema 2 下 arch/os profile 副本与板级独有补丁的量化拆分）先落在本仓，待按硬件与 ABI 条件提 PR 到 `UniXNU` 文档 |
 
-目录工作流每天 UTC 00:00 / 12:00（UTC+8 08:00 / 20:00）各扫一次；手动触发与本地预览：
+扫描是每天 UTC 00:00 / 12:00（UTC+8 08:00 / 20:00）两次；手动触发与本地预览：
 
 ```sh
 gh workflow run sync-devices.yml --repo UniXNU/UniXNU            # 立即重扫
 python3 scripts/porting-record.py site --local liuqin=<本仓路径>  # 本地看生成页
 ```
+
+> 2026-11-21 实测补充：**上游的扫描现在是红的，不在本仓**。`Sync device documentation`
+> 连续三次 schedule 运行失败（`device catalog: 'evidence'`，例如 run `44876296170`），
+> 根因是几个第三方格式 2 记录的 `[[area]]` 没有 `evidence` 键
+> （`xiaoan919/UniXNU-ace6` 11 个区、`lu4nn3ry/hawaii-unixnu` 6 个、
+> `ye3912/unixnu-oneplus-8-pro` 20 个），而 `scripts/porting-record.py` 的渲染路径写死
+> `area['evidence']`；另有十来条 pin 住的 revision 已经 404。所以收录刷新要等上游修。
+> 本仓这一侧已经按上游同一条代码路径核过：把默认分支 `8fbf816` 的 `board.toml` +
+> `porting.toml` 喂给 `tools.validate(record, board, ..., allow_custom_components=True)`
+> 是 **通过** 的 —— 也就是说 board 一旦翻成格式 2，记录当场就是 `record_state = "available"`。
+> `gh workflow run sync-devices.yml` 需要 UniXNU 管理员权限（非成员 403），只能等排班。
 
 **剩下两件事**（按代价排序）：
 
