@@ -145,6 +145,7 @@ CI 仓与构建沙箱路径，本仓只存档案，不可直接复现**。
 
 **本仓历史档案**：[硬件](docs/liuqin-hardware.md) · [厂商输入](docs/vendor-inputs.md) ·
 [USB 调试口](docs/liuqin-usb-debug.md) · [移植计划](docs/porting-plan.md) ·
+[launchd SIGKILL 结案（namespace 9 code 0x8 = AMFI execve 拒绝，二进制证明）](docs/bringup-2026-11-22-sigkill-namespace9.md) ·
 [pong 栈初探](docs/liuqin-on-pong-stack.md) · [route B](docs/route-b-qprs6.md) ·
 [bring-up 会话](docs/bringup-2026-11-19-session.md) · [v57 regwalk](docs/bringup-2026-11-19-v57-regwalk.md) ·
 [unixnu 分区方案](docs/b1-unixnu-partition-plan.md) · [userdata 构建](docs/userdata-build-plan.md) /
