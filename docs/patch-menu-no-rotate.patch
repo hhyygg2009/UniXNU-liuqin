@@ -1,0 +1,17 @@
+--- a/Platforms/Nothing/UniXNUPkg/Library/UniXNULib/Menu.c
++++ b/Platforms/Nothing/UniXNUPkg/Library/UniXNULib/Menu.c
+@@ -120,9 +120,11 @@
+   }
+ 
+   RotateMs = Config->RotateSeconds * 1000;
+-  if (!HasInput && (RotateMs == 0)) {
+-    RotateMs = DEFAULT_ROTATE_SEC * 1000;
+-  }
++  // liuqin: this board has no SimpleTextInput device, so HasInput is FALSE and
++  // the menu used to rotate the highlight every DEFAULT_ROTATE_SEC. The
++  // countdown still boots Config->DefaultIndex, but a moving cursor reads as
++  // "the default is Restart". Leave the highlight on the configured default
++  // when nothing can steer the menu; the timeout alone decides.
+ 
+   UniXNUUiDrawFrame (Ui, Config);
+   for (Index = 0; Index < Count; Index++) {

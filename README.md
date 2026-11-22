@@ -5,6 +5,17 @@ Xiaomi Pad 6 Pro / liuqin / SM8475 的 UniXNU 设备仓库，由 UniXNU-sheng �
 XNU 源码、构建驱动、固件、工具链在外部 —— 见「依赖」。
 **硬约束（踩过才知道的那些）在 [`AGENTS.md`](AGENTS.md)，逐轮事实与缺口在 [`porting.toml`](porting.toml)。**
 
+## 两条技术栈（先分清）
+
+| | 旧栈：ShengUfs 路线（本仓主线） | pong 栈（Fly116 线，2026-11-22 并入档案） |
+|---|---|---|
+| iOS | iPadOS 17.7.11 / 21H461 | iPadOS 18.7.10 / 22H374（Darwin 24.6.0） |
+| 存储驱动 | ShengUfs（本机已验证可读写 UFS） | NativeUfs（TUR 无完成中断，当前卡点） |
+| 构建 | Linux 主机 | GitHub Actions `macos-15-intel` |
+| 最远 | launchd 被 SIGKILL（见下） | `Failed to mount root device @IOKitBSDInit.cpp:996` |
+
+两条线在同一台设备上并行；旧栈的 ShengUfs 能完成 UFS 命令，是 pong 栈 UFS 问题最有价值的对照物。
+
 ## 当前状态（2026-11-21，v67）
 
 - 内核 / 固件 / payload / boot.img 全部可在 Linux 主机构建；实机**只用 `fastboot boot`，不写任何分区**。
@@ -17,6 +28,13 @@ XNU 源码、构建驱动、固件、工具链在外部 —— 见「依赖」�
   `namespace 9 / code 0x8` **语义未查清，不许当结论用**。根挂载与 userland 仍未达成。
 - 分区改造（`unixnu` 根分区）已落地并逐字节校验。boot 前先确认设备在不在：v66 断言后当场回
   fastboot，v67 中间十几分钟从主机 USB 完全消失，21:5x 才回到 `19562650 fastboot`。
+
+**pong 栈现状（2026-11-22，v114）**：引导链已打通到「等待根设备」——固件 → 菜单 → DarwinBoot →
+prelinked XNU → IOKit → APFS kext → framebuffer 全部起来；唯一阻塞是 NativeUfs 的 TUR 探测拿不到
+完成中断（`ocs=0f`、`db=1`、`polls=1589`）。v112–v124 的诊断把根因收敛到**固件交接时 UFS 已掉电、
+QMP PHY 不响应写**：[`docs/ufs-investigation-2026-11-22.md`](docs/ufs-investigation-2026-11-22.md)、
+[`docs/ufs-tur-analysis-2026-11-22.md`](docs/ufs-tur-analysis-2026-11-22.md)。
+现成镜像与 Release 见 [Fly116/UniXNU-liuqin](https://github.com/Fly116/UniXNU-liuqin)（tag `v114-2026-11-22`）。
 
 逐轮细节：[`docs/boot-rounds-v35-v44.md`](docs/boot-rounds-v35-v44.md)、
 [`docs/bringup-2026-11-21-v66-round.md`](docs/bringup-2026-11-21-v66-round.md)、
@@ -54,6 +72,9 @@ tests/metaclass-simtest/run.sh                                    # ALL SIM ASSE
 python3 ../UniXNU/scripts/porting-record.py check --device <本仓> [--base origin/main]
 ```
 
+pong 栈的组装与 CI 脚本在 `docs/`（`make-v112.sh`、`ci-fetch-kernel.sh` 等）——**依赖 Fly116 的私有
+CI 仓与构建沙箱路径，本仓只存档案，不可直接复现**。
+
 ## 目录与依赖
 
 | 路径 | 内容 |
@@ -80,6 +101,7 @@ python3 ../UniXNU/scripts/porting-record.py check --device <本仓> [--base orig
 | v61–v65 | 修绑定；v62 是空转轮（`export` 不进 env dict）；里程碑叠加层可关，面板不再重影 |
 | v66 | 内核确实重编（看 `out/liuqin/logs`，别看 VERSION 串）→ 新墙：`copyio.c:94` PAN 断言 |
 | v67 | 关掉全任务采样 → 断言消失；新墙：launchd 被 SIGKILL（`namespace 9 code 0x8`，未解释） |
+| pong v106–v124 | （Fly116 线）prelink slide / ADT 容器逐项排除 → 上游源码重编过 VM bootstrap → AppleARMCPU 校验二进制绕过 → 到 root device；UFS PHY 上电未解，档案在 `docs/` |
 
 ## 规范符合性与发布
 
@@ -116,7 +138,8 @@ python3 ../UniXNU/scripts/porting-record.py check --device <本仓> [--base orig
 
 Fly116 PR #1 的 README 原文（§0–§13，含致谢与 AI 用量统计）**逐字保留**在
 [`docs/fly116-pr1-readme.md`](docs/fly116-pr1-readme.md)；原文可取 `git show 4fc7f56:README.md`，
-本仓原版可取 `git show cbbb7b1:README.md`。
+本仓原版可取 `git show cbbb7b1:README.md`。pong 栈的 bring-up 档案（v106–v124、A2 runbook、
+菜单修复）在 `docs/`；其中依赖私有 CI 的脚本已标注，复现以 [Fly116/UniXNU-liuqin](https://github.com/Fly116/UniXNU-liuqin) 为准。
 通用指南：[移植步骤](https://unixnu.com/zh/porting/steps)、
 [设备仓库](https://unixnu.com/zh/porting/device-repository)、
 [适配记录与发布复用](https://unixnu.com/zh/porting/records)、
