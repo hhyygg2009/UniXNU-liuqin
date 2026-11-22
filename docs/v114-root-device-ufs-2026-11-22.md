@@ -64,10 +64,18 @@ bash docs/ci-fetch-kernel.sh 44891152869 kernel-upstream-encrypted
 # 打补丁（AppleARMCPU 校验 -> true）：
 python3 - <<PY
 d=bytearray(open(".../kernel.macho","rb").read())
-fo=0x18dd000+(0xfffffff00b80dad4-0xfffffff00b7a8000)
+fo=0x18dd000+(0xfffffff00b80dad4-0xfffffff00b7a9000)   # 勘误：段基址是 …b7a9000，见下方注
 d[fo:fo+8]=bytes.fromhex("20008052c0035fd6")
 open("patched-kernel.macho","wb").write(d)
 PY
 # 组镜像（官方 finalize + 菜单修复 FD + Cape DTB）：
 bash docs/make-v112.sh 44891152869 boot-v114.img patched-kernel.macho
 ```
+
+> **勘误（本仓合并时核出，2026-11-22）**：本节原稿的段基址写成 `0xfffffff00b7a8000`，
+> 照它算得 `fo=0x1942ad4`，与 §5 表里实际打的 `0x1943AD4` 差 `0x1000`——按原稿复现会把补丁
+> 打到目标前 4 KB。正确基址是 `__PLK_TEXT_EXEC` 的 `vmaddr = 0xfffffff00b7a9000`：
+> `0x18dd000 + (0xfffffff00b80dad4 − 0xfffffff00b7a9000) = 0x1943ad4`。
+> §5 的哈希（补丁后内核 `157641da…`）与 Release 资产一致，说明实际补丁位置没错，错的只是这行公式。
+> 更稳的做法是用 `docs/patch-armcpu-validate.py`：它自己解析 Mach-O 段表做 VA→文件偏移映射，
+> 并先校验目标处 prologue（`sub sp,sp,#0xc0 ; stp x28,x27,[sp,#0x60]`）才落补丁。

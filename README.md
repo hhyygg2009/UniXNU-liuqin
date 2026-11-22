@@ -134,6 +134,29 @@ CI 仓与构建沙箱路径，本仓只存档案，不可直接复现**。
    H16 那段历史目前只能引 `docs/boot-rounds-v35-v44.md`。
 5. **`.cache/firmware` 的历史对象**：已移出索引并忽略，公开历史里还在；是否重写由维护者决定。
 
+## 文档索引（pong 栈档案 + 本仓判读）
+
+**pong 栈（Fly116 线，2026-11-22 并入）**：[v106–v110 变量排除](docs/prelink-slide-exclusion-2026-11-21.md) ·
+[上游源码重编与 CI](docs/v112-upstream-kernel-2026-11-21.md) ·
+[到 root device](docs/v114-root-device-ufs-2026-11-22.md) ·
+[TUR 失败分析](docs/ufs-tur-analysis-2026-11-22.md) ·
+[传输层调试 v112–v124](docs/ufs-investigation-2026-11-22.md) ·
+[A2 runbook](docs/a2-partition-runbook.md) · [菜单默认项](docs/menu-default-entry.md)
+
+**本仓历史档案**：[硬件](docs/liuqin-hardware.md) · [厂商输入](docs/vendor-inputs.md) ·
+[USB 调试口](docs/liuqin-usb-debug.md) · [移植计划](docs/porting-plan.md) ·
+[pong 栈初探](docs/liuqin-on-pong-stack.md) · [route B](docs/route-b-qprs6.md) ·
+[bring-up 会话](docs/bringup-2026-11-19-session.md) · [v57 regwalk](docs/bringup-2026-11-19-v57-regwalk.md) ·
+[unixnu 分区方案](docs/b1-unixnu-partition-plan.md) · [userdata 构建](docs/userdata-build-plan.md) /
+[carve 方案](docs/userdata-carve-plan.md) · [trust-cache 计划](docs/trust-cache-plan.md) ·
+[mainline Ubuntu 参考](docs/mainline-ubuntu-reference.md)
+
+> Fly116 原 README（`515f887`）索引里的 `route-plan-2026-11-15.md`、`linux-bringup-tutorial.md`、
+> `v39-linux-bringup.md`、`v39-metaclass-repair.md`、`liuqin-boot-progress.md` 在其仓库与本仓都不存在
+> （内容早在 `8c77587`/`f49d726`/`cad7250` 前后并入根 README，链接未清理）；按 git 历史取回：
+> `git show f49d726^:docs/route-plan-2026-11-15.md`、`git show cad7250^:docs/linux-bringup-tutorial.md`、
+> `git show 8c77587^:docs/v39-linux-bringup.md` 等。
+
 ## 来源与指南
 
 Fly116 PR #1 的 README 原文（§0–§13，含致谢与 AI 用量统计）**逐字保留**在
